@@ -11,6 +11,8 @@
 
 把图像放大后切成带重叠的分块，每个分块在全分辨率下重新生成，再无缝拼合。 它能带来真实的新细节，同时靠每块自带的参考图保持原图内容。
 
+<img width="1189" height="1189" alt="image" src="https://github.com/user-attachments/assets/33e82e76-9f71-4daa-a6cf-eb113d81895b" />
+
 ---
 
 ## 📦 安装
