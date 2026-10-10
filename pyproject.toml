@@ -1,0 +1,18 @@
+[project]
+name = "ComfyUI-Element_TileUpscale"
+description = "An integrated tiled refinement/upscale node designed specifically for **reference-image editing models**, such as Qwen Image 2.1, Qwen image Edit 2511, FLUX.2 klein, and Krea2."
+version = "0.2.0"
+license = {file = "LICENSE"}
+
+
+[project.urls]
+Repository = "https://github.com/supElement/ComfyUI-Element_TileUpscale"
+#  Used by Comfy Registry https://registry.comfy.org
+Documentation = "https://github.com/supElement/ComfyUI-Element_TileUpscale/wiki"
+"Bug Tracker" = "https://github.com/supElement/ComfyUI-Element_TileUpscale/issues"
+
+[tool.comfy]
+PublisherId = "sup-element"
+DisplayName = "ComfyUI-Element_TileUpscale"
+Icon = ""
+includes = []
