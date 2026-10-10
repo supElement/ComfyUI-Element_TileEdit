@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI-Element_TileUpscale"
 description = "An integrated tiled refinement/upscale node designed specifically for **reference-image editing models**, such as Qwen Image 2.1, Qwen image Edit 2511, FLUX.2 klein, and Krea2."
-version = "0.2.0"
+version = "0.2.1"
 license = {file = "LICENSE"}
 
 
