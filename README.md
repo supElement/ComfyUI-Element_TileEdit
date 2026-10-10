@@ -1,3 +1,10 @@
+<div align="center">
+
+[![中文](https://img.shields.io/badge/语言-简体中文-red?style=for-the-badge)](./README.md)
+[![English](https://img.shields.io/badge/Language-English-blue?style=for-the-badge)](./README.en.md)
+
+</div>
+
 # ComfyUI-Element TileUpscale
 
 一体化分块放大（tiled refine/upscale）节点，专为**参考图编辑类模型**设计：Qwen Image 2.1、FLUX.2 klein、Krea2 等。Krea2需要krea2_identity_edit lora。
