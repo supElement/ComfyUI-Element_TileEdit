@@ -7,15 +7,24 @@
 
 # ComfyUI-Element TileUpscale
 
-一体化分块放大（tiled refine/upscale）节点，专为**参考图编辑类模型**设计：Qwen Image 2.1、FLUX.2 klein、Krea2 等。Krea2需要krea2_identity_edit lora。
+一体化分块放大（tiled refine/upscale）节点，专为**参考图编辑类模型**设计：Qwen Image 2.1、FLUX.2 klein、Krea2 等。Krea2 需要 [krea2_identity_edit](https://huggingface.co/conradlocke/krea2-identity-edit/tree/main) lora 。
 
 把图像放大后切成带重叠的分块，每个分块在全分辨率下重新生成，再无缝拼合。 它能带来真实的新细节，同时靠每块自带的参考图保持原图内容。
 
 ---
 
-## 安装
+## 📦 安装
 
-将本文件夹放入 `ComfyUI/custom_nodes/`，重启 ComfyUI。节点在搜索栏输入 `Element Tiled Upscale` 即可找到（类别：Element TileUpscale）。
+### 方式一：手动安装（Manual Installation）
+
+```bash
+cd ./ComfyUI/custom_nodes
+git clone https://github.com/supElement/ComfyUI-Element_TileUpscale.git
+```
+
+### 方式二：通过 Manager 安装（Install using Manager）
+
+在 ComfyUI Manager 中搜索 `ComfyUI-Element_TileUpscale`，点击 Install。
 
 依赖即 ComfyUI 本体，无额外安装项。
 
