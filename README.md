@@ -163,10 +163,11 @@ git clone https://github.com/supElement/ComfyUI-Element_TileUpscale.git
 | 参数 | 说明 |
 |---|---|
 | **reference_mode** | 开 = Krea 2 identity-edit 专用 in-context 路径；关 = 通用 conditioning 路径。 |
-| redo_first_tile | 在所有其他图块处理完成后，再次重新生成第一个图块，以便它能将已完成的相邻图块作为上下文参考。此操作仅在存在多个图块时适用。 |
 | clip | 接入并填写 prompt 后，每个分块连同自身像素一起重新编码（官方参考图模式）。Qwen 2.1 / Edit 2509 / 2511 必接；Krea 2 identity-edit（reference_mode 开）必接；FLUX.2 klein 不需要接——其文本编码器为纯文本，无 vision 槽，接入无效 |
 | **prompt** | 与 clip 配套的逐块指令文本，例如： enhance quality preserving all the details |
+| redo_first_tile | 在所有其他图块处理完成后，再次重新生成第一个图块，以便它能将已完成的相邻图块作为上下文参考。此操作仅在存在多个图块时适用。 |
 | grounding_px | 逐块文本编码的 vision 输入尺寸，默认 768，含义随模型不同：Edit 2509/2511 为 area 桶，0 或 ≥384 一律使用官方 384×384；Qwen 2.1 忽略此参数（锁定为分块自身尺寸）；Krea 2 为视觉输入最长边上限，0 = 分块自身尺寸 |
+| reference_strength | “每图块参考强度” 决定如何锚定原始图像。设定为 1.0 时表示完整参考。较低的数值会降低分辨率后构建参考，这样既保留了构图和色彩信息，又放宽了对轮廓的限制，从而允许模型重新绘制原本有缺陷的形状。 |
 
 ### 输出
 
