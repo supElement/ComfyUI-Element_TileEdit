@@ -253,12 +253,13 @@ _GROUNDING_TEMPLATE = (
 )
 
 
-def _grounded_conditioning(clip, prompt, image, grounding_px):
+def _grounded_conditioning(clip, prompt, image, grounding_px, reference_strength=1.0):
     """
     Encode the prompt with one tile as the text encoder's vision input. The Krea 2 edit LoRAs see
     the source twice during training: as latent tokens (appearance) and inside the text encoder's
     user turn (semantics). Grounding per tile keeps both paths talking about the same pixels.
     """
+    image = _relaxed_reference_pixels(image, reference_strength, keep_size=True)
     samples = image.movedim(-1, 1)
     h, w = samples.shape[2], samples.shape[3]
     if grounding_px and max(h, w) > grounding_px:
@@ -270,23 +271,22 @@ def _grounded_conditioning(clip, prompt, image, grounding_px):
     return [[entry[0].to("cpu"), {k: (v.to("cpu") if torch.is_tensor(v) else v) for k, v in entry[1].items()}]
             for entry in conditioning]
 
-def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_px, reference_method=None, encode_negative=False, qwen21=False):
+def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_px, reference_method=None, encode_negative=False, qwen21=False, reference_strength=1.0):
     samples = tile_pixels[:1].movedim(-1, 1)
     if qwen21:
-        # Qwen Image 2.1 (official TextEncodeQwenImage21): the text encoder and the VAE see the
-        # SAME image, because the DiT splices the reference latent exactly where the vision
-        # tokens sat ("image_slots"), one vision token == one 32px DiT token. The tile is
-        # already 32px-aligned and the sampling latent IS this size, so no resize — any other
-        # size shifts the edit.
-        s = tile_pixels[:1]
+        # image_slots splice 要求参考 latent 与 tile 的 latent 网格严格同尺寸,
+        # 所以只能在像素空间低通: 降采样再还原到原尺寸。
+        s = _relaxed_reference_pixels(tile_pixels[:1], reference_strength, keep_size=True)
         rgb = s[:, :, :, :3]
         if s.shape[-1] > 3:
-            rgb = rgb * s[:, :, :, 3:] + (1.0 - s[:, :, :, 3:])  # vision tower sees alpha over white, the vae keeps all four
+            rgb = rgb * s[:, :, :, 3:] + (1.0 - s[:, :, :, 3:])
         ref_latent = vae.encode(s)
         positive = clip.encode_from_tokens_scheduled(clip.tokenize(prompt, images=[rgb], prevent_empty_text=True))
     else:
-        # 2509/2511 (official TextEncodeQwenImageEditPlus): 384x384-area vision bucket.
-        ref_latent = vae.encode(tile_pixels[:1])
+        # 2509/2511 的参考 latent 是多图参考之一, 尺寸可与输出不同,
+        # 直接喂一张真正缩小过的参考, 模型会自由地重新放大它。
+        ref_latent = vae.encode(_relaxed_reference_pixels(tile_pixels[:1], reference_strength))
+
         total = int(384 * 384) if grounding_px <= 0 or grounding_px >= 384 else int(grounding_px * grounding_px)
         scale_by = math.sqrt(total / (samples.shape[3] * samples.shape[2]))
         width = max(1, round(samples.shape[3] * scale_by))
@@ -429,6 +429,31 @@ def _match_channels(image, channels):
                      device=image.device, dtype=image.dtype)
     return torch.cat([image, pad], dim=-1)
 
+def _relaxed_reference_pixels(image, strength, keep_size=False):
+    """Low-pass a tile before it becomes the model's per-tile reference.
+    strength=1.0 keeps the reference exact (current behaviour); 0.5 builds it
+    from half the resolution, 0.25 from a quarter. Layout/colour/identity
+    survive, exact outlines do not, so the model re-draws flawed shapes
+    instead of tracing them. keep_size=False hands over a genuinely smaller
+    reference (Qwen Edit 2509/2511 and FLUX.2 klein are multi-reference
+    models and re-expand it freely). keep_size=True downscales and restores
+    the original pixel size, for references whose latent must land on the
+    tile's exact latent grid (Qwen Image 2.1 image_slots splice, Krea 2
+    vision slot)."""
+    strength = float(strength)
+    if strength >= 0.999:
+        return image
+    scale = max(strength, 0.125)
+    _, h, w, _ = image.shape
+    nh = max(16, round(h * scale / 16) * 16)
+    nw = max(16, round(w * scale / 16) * 16)
+    bchw = image.movedim(-1, 1).float()
+    small = F.interpolate(bchw, size=(nh, nw), mode="area").to(image.dtype)
+    if not keep_size:
+        return small.movedim(1, -1)
+    smooth = F.interpolate(small.float(), size=(h, w), mode="bicubic", align_corners=False).clamp(0.0, 1.0)
+    return smooth.to(image.dtype).movedim(1, -1)
+
 
 def _tile_sampling_callback(previewer, steps, state):
     """
@@ -496,6 +521,9 @@ class TiledUpscale:
                 }),
                 "grounding_px": ("INT", {"default": 768, "min": 0, "max": 4096, "step": 32,
                     "tooltip": "Vision-slot size for the per-tile text encode. Qwen Edit 2509/2511: area bucket, 0 or >=384 = official 384x384 resize. Qwen Image 2.1: ignored (locked to the tile's size). Krea 2: caps the vision input's longest side, 0 = tile size."}),
+                "reference_strength": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 1.0, "step": 0.05,
+                    "tooltip": "How exactly the per-tile reference pins the original image. 1.0 = exact (current shape-preserving behaviour). Lower values build the per-tile reference from reduced resolution (0.5 = half, 0.25 = quarter), keeping composition/colour but freeing outlines so the model re-draws flawed shapes. 0.4-0.7 for repair; raise overlap to control seams."}),
+
                 "clip": ("CLIP", {"tooltip": "Connect for vision-edit models (Qwen Image 2.1, FLUX.2 klein, Krea 2 style-ref LoRA): each tile is re-encoded with itself as the text encoder's vision input, replicating the official reference pattern per tile. When connected, the 'positive'/'negative' inputs are bypassed and 'prompt' is used instead."}),
                 "prompt": ("STRING", {"default": "enhance quality preserving all the details", "multiline": True, "tooltip": "Instruction encoded per tile together with the tile itself as vision input. Used when 'clip' is connected (in either reference_mode); leave empty to use the 'positive' input unmodified (bare reference latent, no vision grounding)" }),
             },
@@ -511,8 +539,7 @@ class TiledUpscale:
         bchw = comfy.utils.common_upscale(bchw, new_w, new_h, "lanczos", "disabled")
         return bchw.permute(0, 2, 3, 1)
 
-    def _sample_tile(self, model, sampling_model, positive, negative, vae, tile_pixels, seed, steps, cfg, sampler_name, scheduler, denoise,
-                     reference_method=None, source_holder=None, previewer=None, state=None, disable_pbar=True, attach_reference=True):
+    def _sample_tile(self, model, sampling_model, positive, negative, vae, tile_pixels, seed, steps, cfg, sampler_name, scheduler, denoise, reference_method=None, source_holder=None, previewer=None, state=None, disable_pbar=True, attach_reference=True, reference_strength=1.0):
         """Regenerate one tile: encode it, hand it to the model as reference, sample, decode."""
         if tile_pixels.shape[-1] > 3:
             try:
@@ -521,17 +548,31 @@ class TiledUpscale:
                 tile_latent = vae.encode(tile_pixels[:, :, :, :3])
         else:
             tile_latent = vae.encode(tile_pixels)
-
+        # The initial sampling latent stays the exact tile (denoise<1 keeps
+        # plain img2img semantics; at denoise=1 the sampler discards it
+        # anyway). Only the *reference* the model conditions on gets relaxed.
+        needs_ref = source_holder is not None or attach_reference
+        if needs_ref and reference_strength < 0.999:
+            ref_pixels = _relaxed_reference_pixels(tile_pixels, reference_strength)
+            try:
+                ref_latent = vae.encode(ref_pixels)
+            except Exception:
+                ref_latent = vae.encode(ref_pixels[:, :, :, :3])
+        else:
+            ref_latent = tile_latent
         if source_holder is not None:
-            source_holder["latent"] = model.model.process_latent_in(tile_latent)
+            # Krea 2 in-context: the smaller source latent is expanded back to
+            # the tile grid by _krea2_in_context_forward's own F.interpolate.
+            source_holder["latent"] = model.model.process_latent_in(ref_latent)
             positive_tile = positive
             negative_tile = negative
         elif not attach_reference:
             positive_tile = positive
             negative_tile = negative
         else:
-            positive_tile = node_helpers.conditioning_set_values(positive, {"reference_latents": [tile_latent]}, append=True)
-            negative_tile = negative  
+            positive_tile = node_helpers.conditioning_set_values(positive, {"reference_latents": [ref_latent]}, append=True)
+            negative_tile = negative
+  
             if reference_method is not None:
                 positive_tile = node_helpers.conditioning_set_values(positive_tile, {"reference_latents_method": reference_method})
 
@@ -550,7 +591,7 @@ class TiledUpscale:
         return decoded
 
     def refine(self, model, positive, negative, vae, image, upscale_by, tile_size, overlap, feather, seed, steps, cfg,
-               sampler_name, scheduler, denoise, reference_mode=False, redo_first_tile=True, grounding_px=768, clip=None, prompt="enhance quality preserving all the details"):
+               sampler_name, scheduler, denoise, reference_mode=False, redo_first_tile=True, grounding_px=768, clip=None, prompt="enhance quality preserving all the details", reference_strength=1.0):
         alignment = _pixel_alignment(model)
 
         if reference_mode:
@@ -650,12 +691,11 @@ class TiledUpscale:
                 crop = source[:, info["y"]:info["y"] + info["height"], info["x"]:info["x"] + info["width"], :]
 
                 if grounded_in_context:
-                    tile_positive.append(_grounded_conditioning(clip, prompt, crop, grounding_px))
+                    tile_positive.append(_grounded_conditioning(clip, prompt, crop, grounding_px, reference_strength))
                     if cfg > 1.0:
-                        tile_negative.append(_grounded_conditioning(clip, "", crop, grounding_px))
+                        tile_negative.append(_grounded_conditioning(clip, "", crop, grounding_px, reference_strength))
                 else:
-                    pos_c, neg_c = _grounded_reference_conditioning(clip, prompt, vae, crop, grounding_px,
-                                                                    reference_method, encode_negative=(cfg > 1.0), qwen21=qwen21)
+                    pos_c, neg_c = _grounded_reference_conditioning(clip, prompt, vae, crop, grounding_px, reference_method, encode_negative=(cfg > 1.0), qwen21=qwen21, reference_strength=reference_strength)
 
                     tile_positive.append(pos_c)
                     if cfg > 1.0:
@@ -700,7 +740,7 @@ class TiledUpscale:
                                           tile_negative[info["tile_id"]] if tile_negative else negative,
                                           vae, tile_input, seed, steps, cfg, sampler_name, scheduler, denoise,
                                           reference_method, source_holder, previewer, state, disable_pbar,
-                                          attach_reference)
+                                          attach_reference, reference_strength=reference_strength)
 
             if generated.shape[1] != h or generated.shape[2] != w:
                 generated = F.interpolate(generated.permute(0, 3, 1, 2), size=(h, w), mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
