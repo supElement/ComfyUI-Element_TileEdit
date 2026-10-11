@@ -26,10 +26,10 @@ LATENT_SCALE = 16
 # neighbour back to the plain source. Deliberately small: the neighbour's pixels have to reach the
 # model at full strength across most of the band, or the model stops treating them as something to
 # continue. The fade only exists so the input has no step at the rim.
-_CONTEXT_EDGE = 0.25
+_CONTEXT_EDGE = 0.35
 
 # How far a tile drifts from its neighbours near its own edges, as a fraction of the tile.
-_EDGE_FALLOFF = 0.15
+_EDGE_FALLOFF = 0.075
 
 # Bounds for an automatically chosen tile. Attention cost grows with the square of the token count
 # while the tile count only falls linearly with area, so the total cost grows quadratically.
@@ -40,7 +40,7 @@ _AUTO_TILE_MIN, _AUTO_TILE_MAX = 1024, 1536
 _DETAIL_SHARPNESS = 20.0
 
 # Frequency split between the two, as a fraction of the overlap.
-_DETAIL_RADIUS = 0.25
+_DETAIL_RADIUS = 0.35
 
 
 def _pixel_alignment(model):
@@ -389,6 +389,7 @@ def _resolve_geometry(width, height, tile_size, overlap, alignment):
         tile_size = max(alignment, round(tile_size / alignment) * alignment)
     if auto_overlap:
         overlap = round(tile_size * 2 * _EDGE_FALLOFF / alignment) * alignment
+        overlap = min(overlap, 256)   #重叠区最大 256px
         overlap = max(0, min(overlap, tile_size - alignment))
     return tile_size, overlap, auto_tile, auto_overlap
 
@@ -474,7 +475,7 @@ class TiledUpscale:
                 "upscale_by": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 8.0, "step": 0.05}),
                 "tile_size": ("INT", {"default": 0, "min": 0, "max": 4096, "step": 16, "tooltip": "Resolution each tile is regenerated at. 0 picks one from the output size: "
                                      "about four tiles along the longest side, kept between 1024 and 1536."}),
-                "overlap": ("INT", {"default": 0, "min": 0, "max": 2048, "step": 16, "tooltip": "How much neighbouring tiles share. 0 picks 30% of the tile size."}),
+                "overlap": ("INT", {"default": 0, "min": 0, "max": 2048, "step": 16, "tooltip": "How much neighbouring tiles share. 0 = auto: 15% of the tile size, capped at 256px (whichever is smaller). Any non-zero value is used as-is, with no cap. Higher = smoother seams but more compute (cost scales ~quadratically with overlap)."}),
                 "feather": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "steps": ("INT", {"default": 4, "min": 1, "max": 10000}),
@@ -485,10 +486,17 @@ class TiledUpscale:
             },
             "optional": {
                 "reference_mode": ("BOOLEAN", {"default": False, "label_on": "Krea 2 identity-edit", "label_off": "conditioning", "tooltip": "Off: tile is attached as reference latent; with 'clip'+'prompt' it also enters the text encoder's vision slot. On: Krea 2 identity-edit in-context forward, requires 'clip'."}),
+                "redo_first_tile": ("BOOLEAN", {
+                    "default": True,
+                    "label_on": "redo first tile",
+                    "label_off": "single pass",
+                    "tooltip": "After all other tiles finish, regenerate the first tile once more so it can "
+                               "see its finished neighbours as context. Only applies when there is more than one tile."
+                }),
                 "grounding_px": ("INT", {"default": 768, "min": 0, "max": 4096, "step": 32,
                     "tooltip": "Vision-slot size for the per-tile text encode. Qwen Edit 2509/2511: area bucket, 0 or >=384 = official 384x384 resize. Qwen Image 2.1: ignored (locked to the tile's size). Krea 2: caps the vision input's longest side, 0 = tile size."}),
                 "clip": ("CLIP", {"tooltip": "Connect for vision-edit models (Qwen Image 2.1, FLUX.2 klein, Krea 2 style-ref LoRA): each tile is re-encoded with itself as the text encoder's vision input, replicating the official reference pattern per tile. When connected, the 'positive'/'negative' inputs are bypassed and 'prompt' is used instead."}),
-                "prompt": ("STRING", {"default": "", "multiline": True, "tooltip": "Instruction encoded per tile together with the tile itself as vision input. Used when 'clip' is connected (in either reference_mode); leave empty to use the 'positive' input unmodified (bare reference latent, no vision grounding)."}),
+                "prompt": ("STRING", {"default": "enhance quality preserving all the details", "multiline": True, "tooltip": "Instruction encoded per tile together with the tile itself as vision input. Used when 'clip' is connected (in either reference_mode); leave empty to use the 'positive' input unmodified (bare reference latent, no vision grounding)" }),
             },
         }
 
@@ -541,7 +549,7 @@ class TiledUpscale:
         return decoded
 
     def refine(self, model, positive, negative, vae, image, upscale_by, tile_size, overlap, feather, seed, steps, cfg,
-               sampler_name, scheduler, denoise, reference_mode=False, grounding_px=768, clip=None, prompt=""):
+               sampler_name, scheduler, denoise, reference_mode=False, redo_first_tile=True, grounding_px=768, clip=None, prompt="enhance quality preserving all the details"):
         alignment = _pixel_alignment(model)
 
         if reference_mode:
@@ -612,7 +620,7 @@ class TiledUpscale:
         def merged_image():
             return (canvas / weight_sum.clamp(min=1e-8)) + (detail / detail_sum.clamp(min=1e-8))
 
-        redo_first = len(tiles) > 1
+        redo_first = len(tiles) > 1 and redo_first_tile
 
         previewer = latent_preview.get_previewer(model.load_device, model.model.latent_format)
         state = {"preview": None}
