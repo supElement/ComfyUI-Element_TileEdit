@@ -37,7 +37,7 @@ _AUTO_TILE_MIN, _AUTO_TILE_MAX = 1024, 1536
 
 # How much narrower the detail band's transition is than the blend ramp, so doubled contours
 # cannot survive the blend.
-_DETAIL_SHARPNESS = 20.0
+_DETAIL_SHARPNESS = 5
 
 # Frequency split between the two, as a fraction of the overlap.
 _DETAIL_RADIUS = 0.35
@@ -391,6 +391,7 @@ def _resolve_geometry(width, height, tile_size, overlap, alignment):
         overlap = round(tile_size * 2 * _EDGE_FALLOFF / alignment) * alignment
         overlap = min(overlap, 256)   #重叠区最大 256px
         overlap = max(0, min(overlap, tile_size - alignment))
+    overlap = max(0, min(overlap, tile_size - alignment))
     return tile_size, overlap, auto_tile, auto_overlap
 
 
@@ -624,9 +625,6 @@ class TiledUpscale:
 
         previewer = latent_preview.get_previewer(model.load_device, model.model.latent_format)
         state = {"preview": None}
-        total_runs = len(tiles) + (1 if redo_first else 0)
-        total_pbar = comfy.utils.ProgressBar(total_runs)
-        disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
 
         grounded_in_context = mode == "in_context"
         tile_positive = tile_negative = None
@@ -637,10 +635,15 @@ class TiledUpscale:
             logging.info("[TiledUpscale] grounding pattern: %s", "qwen-image-2.1 (native size, image_slots)" if qwen21 else "edit-plus (384 vision bucket)")
         attach_reference = True
 
+        encode_total = len(tiles) if (grounded_in_context or grounded_conditioning) else 0
+        total_runs = encode_total + len(tiles) + (1 if redo_first else 0)
+        total_pbar = comfy.utils.ProgressBar(total_runs)
+        disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+
         if grounded_in_context or grounded_conditioning:
             tile_positive, tile_negative = [], []
-            encode_total = len(tiles)
             for encode_index, info in enumerate(tiles):
+                total_pbar.update_absolute(encode_index, total_runs, state["preview"])
                 logging.info("[TiledUpscale] encoding tile %d/%d (row=%d col=%d) at (%d,%d)",
                              encode_index + 1, encode_total, info["row"], info["col"],
                              info["x"], info["y"])
@@ -657,6 +660,8 @@ class TiledUpscale:
                     tile_positive.append(pos_c)
                     if cfg > 1.0:
                         tile_negative.append(neg_c)
+
+                total_pbar.update_absolute(encode_index + 1, total_runs, state["preview"])
 
             if grounded_conditioning:
                 attach_reference = False
@@ -713,21 +718,21 @@ class TiledUpscale:
 
         first_tile = None
         for index, info in enumerate(tiles):
-            total_pbar.update_absolute(index, total_runs, state["preview"])
-            logging.info("[TiledUpscale] tile %d/%d (row=%d col=%d) at (%d,%d) size %dx%d",
-                         index + 1, total_runs, info["row"], info["col"], info["x"], info["y"],
+            total_pbar.update_absolute(encode_total + index, total_runs, state["preview"])
+            logging.info("[TiledUpscale] sample tile %d/%d (row=%d col=%d) at (%d,%d) size %dx%d",
+                         index + 1, len(tiles), info["row"], info["col"], info["x"], info["y"],
                          info["width"], info["height"])
             generated = place_tile(info)
-            total_pbar.update_absolute(index + 1, total_runs, state["preview"])
+            total_pbar.update_absolute(encode_total + index + 1, total_runs, state["preview"])
             if index == 0 and redo_first:
                 first_tile = generated
 
 
         if redo_first:
-            total_pbar.update_absolute(len(tiles), total_runs, state["preview"])
+            total_pbar.update_absolute(encode_total + len(tiles), total_runs, state["preview"])
             info = tiles[0]
-            logging.info("[TiledUpscale] tile %d/%d (row=%d col=%d) at (%d,%d) size %dx%d (redo with finished neighbours)",
-                         total_runs, total_runs, info["row"], info["col"], info["x"], info["y"],
+            logging.info("[TiledUpscale] resample tile 1/1 (row=%d col=%d) at (%d,%d) size %dx%d (redo with finished neighbours)",
+                         info["row"], info["col"], info["x"], info["y"],
                          info["width"], info["height"])
             place_tile(tiles[0], previous=first_tile)
             total_pbar.update_absolute(total_runs, total_runs, state["preview"])
