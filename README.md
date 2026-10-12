@@ -7,7 +7,7 @@
 
 # ComfyUI-Element_TileUpscale
 
-一个专为**参考潜空间编辑模型**设计的分块精修 / 放大节点。它让 FLUX.2 klein、Qwen-Image 2.1 / Edit 2509 / 2511、Krea 2 这类模型在分块放大时，分块参考 + 邻居上下文 + 频率分离融合三层机制共同保证跨块一致性，重绘强度可以放心开到 **0.7–1.0**，同时保持原图的身份、结构与纹理一致——这是传统 img2img 分块放大做不到的。
+一个专为图像编辑模型设计的分块精修 / 编辑 / 放大节点。它让 FLUX.2 klein、Qwen-Image 2.1 / Edit 2509 / 2511、Krea 2 这类模型在分块放大时，以 分块参考 + 邻居上下文 + 频率分离融合三层机制共同保证跨块一致性，denoise 重绘强度可以放心开到 0.7–1.0，同时保持原图的身份、结构与纹理一致；延续图像编辑模型的能力（仅限单图）。这是传统 img2img 分块放大做不到的。
 - Krea2 需要 [krea2_identity_edit](https://huggingface.co/conradlocke/krea2-identity-edit/tree/main) lora 。  
 
 ---
