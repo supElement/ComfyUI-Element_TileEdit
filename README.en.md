@@ -11,6 +11,12 @@ A tile-based refinement/editing/enlargement node designed for image editing mode
 
 - Krea2 requires [krea2_identity_edit](https://huggingface.co/conradlocke/krea2-identity-edit/tree/main) lora.
 
+<img width="2290" height="1123" alt="image" src="https://github.com/user-attachments/assets/ebb876d9-3bc6-436e-a87e-938b7dbf350a" />
+
+---
+
+<img width="2291" height="857" alt="image" src="https://github.com/user-attachments/assets/9725c148-a2ea-41c0-bfe2-607ec64d3c04" />
+
 ## Node Overview
 
 | Node | Status | Function |
