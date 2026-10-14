@@ -61,12 +61,7 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 - Krea 2 的 in-context 路径需要跑完整的 DiT 前向，token 序列是 `text + source + target` 三段拼接，注意力成本比原生长。
 - tile 的 token 数增长时，注意力成本按**平方**增长，因此自动 tile 尺寸被限制在 1024–1536。identity-edit LoRA 的训练分辨率上限约 2MP，tile 请尽量不超过 2MP（1536²≈2.36MP 已越界，1408²≈1.98MP 贴上限）。
 
-### 4. 一体化节点封装较深，拆分版节点补灵活性
-
-- TiledUpscale 把放大、切块、采样、融合封装在一个节点里，替换其中某一步或插入自定义后处理不方便。
-- 需要拆解重组时，用 **Element Tile Split + 原生 KSampler（组）+ Element Tile Merge** 搭等效工作流：Split 负责几何与逐块条件，采样细节完全由你掌控，Merge 负责拼合与可选色彩匹配。
-
-### 5. 不保证对未适配模型的正确性
+### 4. 不保证对未适配模型的正确性
 
 ---
 
