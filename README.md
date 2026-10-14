@@ -48,9 +48,9 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 
 ### 1. 依赖特定的模型能力，对非图像编辑模型不友好
 
-- 节点的全部价值建立在**模型具备参考潜空间（reference latents）或 in-context 参考能力**之上。用 SDXL、普通 Flux t2i、Qwen-Image-2512 这类无参考能力的模型时，它会退化成普通的 tiled img2img——此时它**并不比 TTP 等工具更好**。
+- 节点的全部价值建立在**模型具备参考潜空间参考能力**之上。用 SDXL、普通 Flux t2i、Qwen-Image-2512 这类无参考能力的模型时，它会退化成普通的 tiled img2img——此时它**并不比 TTP 等工具更好**。
 
-### 2. 代码依赖逆向工程，可能存在 comfyUI 跨版本稳定性
+### 2. 模型识别依赖逆向工程，可能存在 comfyUI 跨版本稳定性
 
 - 对模型的识别依赖**类名子串匹配**（`"flux" in type(dm).__name__.lower()`）、**tokenizer 签名反射**（`inspect.signature`）和 `vars()` 遍历。这些都不是稳定 API。
 - Krea2 的 in-context 路径是**手动重建前向传播**，直接调用 `dm.blocks`、`dm.pe_embedder`、`img_slice` 等内部结构；Patch 节点还依赖 core 的 `extra_conds` object-patch 与 DIFFUSION_MODEL wrapper 机制。一旦上游模型实现变动（改名、改签名、改内部布局），节点很可能**静默出错或直接崩溃**。
@@ -58,7 +58,7 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 ### 3. 性能与显存开销更大(在可接受范围内)
 
 - 每个 tile 都要**独立编码参考 latent**；开启 grounding 时，每个 tile 还要**重新走一遍 text encoder 的 vision 编码**。分块越多，这部分开销线性增长。
-- Krea 2 的 in-context 路径需要跑完整的 DiT 前向，token 序列是 `text + source + target` 三段拼接，注意力成本比原生长。
+- Krea2 的 in-context 路径需要跑完整的 DiT 前向，token 序列是 `text + source + target` 三段拼接，注意力成本比原生长。
 - tile 的 token 数增长时，注意力成本按**平方**增长，因此自动 tile 尺寸被限制在 1024–1536。identity-edit LoRA 的训练分辨率上限约 2MP，tile 请尽量不超过 2MP（1536²≈2.36MP 已越界，1408²≈1.98MP 贴上限）。
 
 ### 4. 不保证对未适配模型的正确性
