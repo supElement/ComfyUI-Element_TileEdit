@@ -29,7 +29,7 @@ except Exception:
 
 try:
     from .nodes_patch import ElementKrea2InContextPatch
-    _register("ElementKrea2InContextPatch", ElementKrea2InContextPatch, "Element Krea2 In-Context Patch (beta)")
+    _register("ElementKrea2InContextPatch", ElementKrea2InContextPatch, "Element Krea2 In-Context Patch")
 except Exception:
     logging.warning("[Element TileUpscale] ElementKrea2InContextPatch failed to load:\n%s", traceback.format_exc())
 
