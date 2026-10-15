@@ -20,12 +20,12 @@ A tile-based refinement/editing/enhancement node designed for image editing mode
 
 ## Node Overview
 
-| Node | Status | Function |
-|---|---|---|
-| **Element Tiled Upscale** | Stable | Integrated node: Upscale → Tile → Per-tile reference redraw → Frequency separation fusion, one-click output |
-| **Element Tile Split** | Experimental | Only does upsampling + tiling + per-tile encoding, outputs per-tile LATENT / CONDITIONING / original tile, samplingAssign to ComfyUI native KSampler |
-| **Element Tile Merge** | Experimental | Merges the list of images after per-tile decoding using the same low-frequency/high-frequency separation + feathering weights, optional per-tile color matching |
-| **Element Krea2 In-Context Patch (beta)** | Experimental | Model patch: Allows Krea2 to consume reference latent hangs on conditioning with identity-edit in-context layout |
+| Node | Function |
+|---|---|
+| **Element Tiled Upscale** | Integrated node: Upscale → Tile → Per-tile reference redraw → Frequency separation fusion, one-click output |
+| **Element Tile Split** | Only does upsampling + tiling + per-tile encoding, outputs per-tile LATENT / CONDITIONING / original tile, samplingAssign to ComfyUI native KSampler |
+| **Element Tile Merge** | Merges the list of images after per-tile decoding using the same low-frequency/high-frequency separation + feathering weights, optional per-tile color matching |
+| **Element Krea2 In-Context Patch** | Model patch: Allows Krea2 to consume reference latent hangs on conditioning with identity-edit in-context layout |
 
 ---
 
