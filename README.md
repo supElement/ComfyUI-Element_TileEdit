@@ -20,12 +20,12 @@
 
 ## 节点一览
 
-| 节点 | 状态 | 作用 |
+| 节点 | 作用 |
 |---|---|---|
-| **Element Tiled Upscale** | 稳定 | 一体化节点：放大 → 切块 → 逐块参考重绘 → 频率分离融合，一键出图 |
-| **Element Tile Split** | 实验性 | 只做放大 + 切块 + 逐块编码，输出逐块 LATENT / CONDITIONING / 原图分块，采样交给 ComfyUI 原生 KSampler |
-| **Element Tile Merge** | 实验性 | 把逐块解码后的 IMAGE 列表用同一套低频/高频分离 + 羽化权重拼回整图，可选逐块色彩匹配 |
-| **Element Krea2 In-Context Patch (beta)** | 实验性 | 模型补丁：让 Krea2 以 identity-edit 的 in-context 布局消费挂在 conditioning 上的参考 latent |
+| **Element Tiled Upscale** | 一体化节点：放大 → 切块 → 逐块参考重绘 → 频率分离融合，一键出图 |
+| **Element Tile Split** | 只做放大 + 切块 + 逐块编码，输出逐块 LATENT / CONDITIONING / 原图分块，采样交给 ComfyUI 原生 KSampler |
+| **Element Tile Merge** | 把逐块解码后的 IMAGE 列表用同一套低频/高频分离 + 羽化权重拼回整图，可选逐块色彩匹配 |
+| **Element Krea2 In-Context Patch** | 模型补丁：让 Krea2 以 identity-edit 的 in-context 布局消费挂在 conditioning 上的参考 latent |
 
 ---
 
@@ -175,7 +175,7 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 
 ---
 
-### Element Krea2 In-Context Patch (beta)
+### Element Krea2 In-Context Patch
 
 给 Krea2 模型打两个补丁，使其以 identity-edit LoRA 训练时的布局 `[text｜source(frame=1)｜target(frame=0)]` 消费挂在 conditioning 上的参考：
 
