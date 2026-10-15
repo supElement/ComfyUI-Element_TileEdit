@@ -21,7 +21,7 @@
 ## 节点一览
 
 | 节点 | 作用 |
-|---|---|---|
+|---|---|
 | **Element Tiled Upscale** | 一体化节点：放大 → 切块 → 逐块参考重绘 → 频率分离融合，一键出图 |
 | **Element Tile Split** | 只做放大 + 切块 + 逐块编码，输出逐块 LATENT / CONDITIONING / 原图分块，采样交给 ComfyUI 原生 KSampler |
 | **Element Tile Merge** | 把逐块解码后的 IMAGE 列表用同一套低频/高频分离 + 羽化权重拼回整图，可选逐块色彩匹配 |
