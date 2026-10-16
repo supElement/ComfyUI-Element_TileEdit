@@ -7,7 +7,7 @@
 
 # ComfyUI-Element_TileUpscale
 
-一个专为图像编辑模型设计的分块精修 / 编辑 / 放大节点。它让 FLUX.2 klein、Qwen-Image 2.1 / Edit 2509 / 2511、Krea2 这类模型在分块放大时，以 分块参考 ≫ 频率分离融合 > 邻居上下文 三层机制共同保证跨块一致性，denoise 重绘强度可以放心开到 0.7–1.0，同时保持原图的身份、结构与纹理一致；延续部分图像编辑模型的能力（仅限单图）。这是传统 img2img 分块放大做不到的。
+一个专为图像编辑模型设计的分块精修 / 编辑 / 放大节点。它让 FLUX.2 klein、Qwen-Image 2.1 / Edit 2509 / 2511、Krea2 这类模型在分块放大时，以 分块参考 ≫ 频率分离融合 > 邻居上下文 三层机制共同保证跨块一致性，denoise 重绘强度可以放心开到 0.7–1.0，同时保持原图的身份、结构与纹理一致；每采样步参考强度可以自定义，控制修复强度与一致性的平衡；延续部分图像编辑模型的能力（仅限单图）。这是传统 img2img 分块放大做不到的。
 
 - Krea2 需要 [krea2_identity_edit](https://huggingface.co/conradlocke/krea2-identity-edit/tree/main) lora。
 
@@ -26,6 +26,7 @@
 | **Element Tile Split** | 只做放大 + 切块 + 逐块编码，输出逐块 LATENT / CONDITIONING / 原图分块，采样交给 ComfyUI 原生 KSampler |
 | **Element Tile Merge** | 把逐块解码后的 IMAGE 列表用同一套低频/高频分离 + 羽化权重拼回整图，可选逐块色彩匹配 |
 | **Element Krea2 In-Context Patch** | 模型补丁：让 Krea2 以 identity-edit 的 in-context 布局消费挂在 conditioning 上的参考 latent |
+| **Element Strength Schedule** | 模型补丁：把逐步 reference_strength 调度挂到模型上，供 ElementTileSplit + 原生 KSampler 工作流使用，KSampler 的 model 输入必须接本节点输出。一体化节点内置同款调度且会忽略上游挂载，单节点工作流直接用其自带参数即可。第 i 个值作用于第 i 个采样步（0 起）；少于 steps 重复末值，多于截取；单值 = 恒定。 1.0 = 完全参考；0 = 该步完全无参考；纯 0/1 列表单倍算力，含小数时值≠1 的步双前向。参数设置越低，越会出现漂移，为保证一致性，前几步数值设置要高，建议前几步设置为1，后面几步可根据所使用的模型适当降低，这种设置对修复瑕疵更有利。 对非图像编辑模型，如sdxl、Qwen image 2512等模型无效 |
 
 ---
 
@@ -78,15 +79,16 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 | **Qwen-Image 2.1** | **1.0** | 参考 latent 精确插在 vision token 位置（image_slots），tile 保持原尺寸不 resize | ★★★★★ | 参考信号最原生，多数情况下可直接拉满。细节完全由模型生成，同时身份 / 结构保持一致 |
 | **Qwen-Image Edit 2509** | **1.0** | 384×384 vision bucket + reference latent 双通道 | ★★★★★ | 与 2511 同源，参考通道成熟，可放心拉满 |
 | **Qwen-Image Edit 2511** | **1.0** | 384×384 vision bucket + reference latent 双通道 | ★★★★★ | 同 2509，推荐直接用 1.0 |
-| **Krea2 + krea2_identity_edit** | **0.7 – 0.8** | 手动重建 `[text｜source(frame=1)｜target(frame=0)]` in-context 前向 | ★★★★★ | 高降噪下一致性最好，但有时会出现脏点 **不建议拉满**；0.7–0.8 是清晰度与稳定的最佳平衡点 |
+| **Krea2 + krea2_identity_edit** | **0.7 – 0.8** | 手动重建 `[text｜source(frame=1)｜target(frame=0)]` in-context 前向 | ★★★★ | 高降噪下一致性最好，但有时会出现脏点 **不建议拉满**；0.7–0.8 是清晰度与稳定的最佳平衡点 |
 | **FLUX.2 klein** | **0.7 – 0.8** | 仅 reference-latent 通道（text encoder 为纯文本，无 vision grounding） | ★★★ | 缺少 vision 通道，参考信号弱一档，容易脏、偏色, 可使用[Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 做色彩或变形校正，搭配防偏移类lora使用时可提升至★★★★ |
 | **Qwen-Image-2512/SDXL系列** | **0.2 – 0.5** | 无 | ★ | 非编辑模型无一致性锚定，即使接入ipadapter等方法，效果依然有限 |
 
 以上测试数量有限，存在片面和主观因素，还是要根据不同情况来调整参数。
 
+
 ### Krea2 identity-edit 的搭配要点
 
-- Krea2 turbo + in-context时，**`reference_strength` 推荐保持 1.0**；若想降低 `reference_strength` 值来弱化参考，请使用 Krea2 raw 模型。
+- Krea2 turbo + in-context 时，`reference_strength` 建议从“末段放松”曲线开始（如 4 步，填`1, 1, 0.7, 0.5`）。turbo 步数少，每步强度对结果影响都很大，避免整条曲线大幅低于 1.0（会漂移、发糊）；出现漂移就回到 1.0。旧版“<1.0 会重影、请换 raw 模型”的结论基于已移除的低通/缩小机制，作废。
 - **`negative_prompt` 建议留空**：identity-edit 训练时的无条件分布就是"同一张图 + 空文本"，留空即与训练分布对齐；cfg=1.0 时节点也不会浪费编码时间。
 ---
 
@@ -125,10 +127,10 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 
 | 参数 | 说明 |
 |---|---|
-| **reference_mode** | 开 = Krea2 identity-edit 专用 in-context 路径（节点内部自建参考传递机制，**无需再接 Patch 节点**）；关 = 通用 conditioning 路径（Krea 2 下建议配合 Patch 节点使用，见下文） |
+| **reference_mode** | 开 = Krea2 identity-edit 专用 in-context 路径（节点内部自建参考传递机制，无需接 Patch 节点；即使接了也会被本节点自动摘除）。关 = 通用 conditioning 路径（Krea2 下必须配合 Patch 节点，该 Patch 会正常生效，并与逐步参考强度调度正常叠加） |
 | **redo_first_tile** | 在所有其他图块处理完成后，再次重新生成第一个图块，以便它能将已完成的相邻图块作为上下文参考。此操作仅在存在多个图块时适用。对图像编辑模型影响很小 |
 | **grounding_px** | 逐块文本编码的 vision 输入尺寸，默认 768，含义随模型不同：Edit 2509/2511 为 area 桶，0 或 ≥384 一律使用官方 384×384；Qwen 2.1 忽略此参数（锁定为分块自身尺寸）；Krea2 为视觉输入最长边上限，0 = 分块自身尺寸 |
-| **reference_strength** | 每图块参考强度，决定如何锚定原始图像。1.0 = 完整参考。降低数值的效果分两种路径：vision/grounding 类参考得到**同尺寸高斯低通**；reference-latent 类参考（Qwen Edit 2509/2511）得到**真缩小的小图**（area 平均池化，模型自由重新放大）。 <1.0 时 Krea2 turbo 有概率出现重影，建议 1.0 或 改用krea2 raw模型 |
+| **reference_strength** | 每步参考强度（STRING）。直接填数值列表：1.0, 0.8, 0.5（中英文逗号/顿号/冒号均可），也可接收 Element_listGraph_Curve 的 strength_string 输出。第 i 个值作用于第 i 个采样步（0 起）；少于 steps 重复末值，多于截取；单值 = 恒定。 1.0 = 完全参考；0 = 该步完全无参考；纯 0/1 列表单倍算力，含小数时值≠1 的步双前向。参数设置越低，越会出现漂移，为保证一致性，前几步数值设置要高，建议前几步设置为1，后面几步可根据所使用的模型适当降低，这种设置对修复瑕疵更有利。 denoise 不影响本参数；vision/grounding 类参考不受本参数影响。对非图像编辑模型，如sdxl、Qwen image 2512等模型无效 |
 
 #### 输出
 
@@ -151,7 +153,7 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 | **upscale_by** | 同上 |
 | **tile_size / overlap** | 同上（tooltip 中含 ≤2MP 提示） |
 | **reference_mode** | 开 = Krea 2 identity-edit：逐块输出 vision 槽 grounding + 参考 latent 双通道条件，参考同时挂正负两侧；**必须配合 Patch 节点**（Split 自身不重建前向）。关 = 通用 conditioning 路径 |
-| **grounding_px / reference_strength / prompt / negative_prompt** | 含义与一体化节点相同 |
+| **grounding_px / prompt / negative_prompt** | 含义与一体化节点相同。Split 没有 reference_strength 参数：逐步强度调度请用 **Element Strength Schedule** 节点挂在 model 上（其输出接 KSampler 的 model 输入） |
 
 **输出**：`tile_positives` / `tile_negatives`（逐块 CONDITIONING 列表）、`tile_latents`（逐块 LATENT 列表）、`grid`（分块网格）、`tile_sources`（原图分块 IMAGE 列表，供 Merge 做色彩匹配参考）。
 
@@ -175,29 +177,15 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 
 ---
 
-### Element Krea2 In-Context Patch
-
-给 Krea2 模型打两个补丁，使其以 identity-edit LoRA 训练时的布局 `[text｜source(frame=1)｜target(frame=0)]` 消费挂在 conditioning 上的参考：
-
-1. **`extra_conds` 重写**：采样器在构造条件时会调用 `model.extra_conds(**cond_dict)` 并**丢弃未知键**——`reference_latents` 原本到不了 DiT 前向。这里把它显式转换成前向形参 `ref_latents`（与 Ostris 的 Krea2OstrisEditModelPatch 同一方法）。
-2. **DIFFUSION_MODEL wrapper**：读取 `ref_latents`，把序列按 identity-edit 布局重建后走 DiT，而不是 ComfyUI 原生的 T2I 布局。
-
-非 Krea2 模型 或 开 `reference_mode` 参数时 不需要接
-
----
-
 ## 常见问题
 
 **显存不够？**
-
 减小 tile_size（分块更多、单块更小）。Edit 2509/2511 可额外降低 grounding_px；Qwen 2.1 的 grounding_px 不参与计算，只能减小 tile_size。
 
 **SDXL 等普通模型能用吗？**
-
 能。节点会自动退化为普通分块 img2img，参考 latent 被模型忽略，用 denoise 控制细节强度（0.2 – 0.5 起试）。
 
 **Krea 2 用单节点时要不要接 Patch 节点？**
-
-`reference_mode` 开着就不需要（内部自建同款机制）；关着（conditioning 路径）就建议接，否则参考被 core 静默丢弃。详见上文 Patch 节点的使用时机表。
+`reference_mode` 开着就不需要（内部自建同款机制，接了也会被自动忽略）；关着（conditioning 路径）**必须接**，否则参考被 core 静默丢弃。详见上文 Patch 节点说明。
 
 
