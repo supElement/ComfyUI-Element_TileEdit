@@ -62,7 +62,7 @@ def _reference_method(model, conditioning):
     except Exception:
         return None
     dm_name = type(diffusion_model).__name__.lower()
-    if "flux" in dm_name:
+    if "flux" in dm_name and "flux3" not in dm_name:
         return "index"
     if getattr(diffusion_model, "default_ref_method", "unset") is None:
         return "index_timestep_zero"
@@ -129,7 +129,7 @@ def _parse_strength_schedule(value, default="1.0"):
     if value is None:
         value = default
     if isinstance(value, (int, float)):
-        text = str(value)                      # 兼容直接连 FLOAT 进来
+        text = str(value)                      
     else:
         text = str(value).strip()
     if not text:
@@ -164,9 +164,9 @@ class _StepSchedule:
     def strength(self, timesteps):
         t = float(timesteps.reshape(-1)[0]) if torch.is_tensor(timesteps) else float(timesteps)
         if self.last_t is not None:
-            if t > self.last_t + 1e-6:          # 反弹 = 新一轮
+            if t > self.last_t + 1e-6:          
                 self.step = 0
-            elif t < self.last_t - 1e-6:        # 下降 = 下一步
+            elif t < self.last_t - 1e-6:        
                 self.step += 1
         self.last_t = t
         return self.values[min(self.step, len(self.values) - 1)]
@@ -182,33 +182,126 @@ def _refs_are_present(refs):
         return True
     if isinstance(refs, (list, tuple)):
         return len(refs) > 0
-    return True    # CONDList 等其它参考容器：按有参考处理
+    return True    
 
 
 def _find_ref_slot(args, kwargs):
-    """DiT forward 各模型族的 ref 传递位置不同：Qwen/FLUX.2 把 ref_latents 按
-    位置参数传进 wrapper（execute 的第 5 个位置参数），旧版可能走 kwarg。
-    返回 ("args", i) / ("kwargs", key) / (None, None)。"""
+    """DiT forward 各模型族的 ref 传递位置不同：Qwen/FLUX.2/FLUX.3(蒸馏慢路径) 把
+    ref_latents 按位置参数传进 wrapper，且是 list 形态（args 里的某个位置）；
+    FLUX.3 base 在 inference_mode 快路径下改发 kwargs 里的 ref_states/ref_shapes。
+    返回 ("args", i) / ("kwargs", key) / ("flux3", None) / (None, None)。"""
     for key in ("ref_latents", "reference_latents"):
         if kwargs.get(key) is not None:
             return ("kwargs", key)
+    if kwargs.get("ref_states") is not None:
+        return ("flux3", None)
     for i, a in enumerate(args):
-        if torch.is_tensor(a):
-            if a.ndim == 5:                                   # (B,C,T,H,W) 参考张量
-                return ("args", i)
-        elif isinstance(a, (list, tuple)):
-            if len(a) > 0 and torch.is_tensor(a[0]):          # 参考张量列表
-                return ("args", i)
+        if torch.is_tensor(a) and a.ndim == 5:
+            return ("args", i)
+        if isinstance(a, (list, tuple)) and len(a) > 0 and torch.is_tensor(a[0]):
+            return ("args", i)
     return (None, None)
 
 
 def _set_refs(args, kwargs, kind, slot, value):
     """返回把 ref 槽位替换成 value（None = 摘除参考）后的 (args, kwargs)。"""
+    if kind == "flux3":
+        # FLUX.3 快路径：参考只能整体摘除（value 忽略，此路径不做换参考）。
+        kwargs = dict(kwargs)
+        kwargs["ref_states"] = None
+        kwargs["ref_shapes"] = None
+        return args, kwargs
     if kind == "args":
         return args[:slot] + (value,) + args[slot + 1:], kwargs
     kwargs = dict(kwargs)
     kwargs[slot] = value
     return args, kwargs
+
+# ---------------------------------------------------------------------------
+# 上游 prefix-cache bug 探测（Qwen Image 2.1，Comfy-Org/ComfyUI #16511/#16947）
+# comfy/ldm/wan/model_animate2.py 的 PoseBranchCache.select 用 self.slots.remove(s)
+# 做 MRU 移动：当目标槽前面躺着形状不同的另一个槽时（有参考/无参考两种组成
+# 交替就会出现），dict 比较会对 key 张量执行 ==，直接 RuntimeError。
+# 上游修复该行后行为消失。结果进程内只判定一次，ComfyUI 更新后重启自动重判。
+# ---------------------------------------------------------------------------
+_NOREF_CACHE_BYPASS = None
+
+def _probe_pose_branch_cache(cls):
+    """对已安装核心的 PoseBranchCache.select 做真实行为探测。
+    返回 True=仍有 bug / False=已修复 / None=探针无法进行（结构变了）。
+    生产场景里 K_noref 槽排在 K_ref 槽后面时 list.remove 崩，探针原样复现。"""
+    c = object.__new__(cls)            # 绕过 __init__，手工布置最小状态
+    c._pending = {}                    # select 开头会检查它
+    c.slot = None
+    c.slots = [{"key": torch.zeros(1, 8)},   # 前槽：形状不同（等价 K_ref 槽）
+               {"key": torch.zeros(1, 4)}]   # 目标槽（等价 K_noref 槽）
+    try:
+        hit = cls.select(c, torch.zeros(1, 4), create=False)
+    except RuntimeError:
+        return True                     # 跨形状比较崩溃 = 未修复
+    except Exception:
+        return None                     # 探针失效，交回退逻辑
+    return bool(hit) and c.slot is c.slots[-1]
+
+def _noref_cache_bypass_needed():
+    """True = 摘除参考的前向需要隔离 prefix cache。进程内只判定一次。"""
+    global _NOREF_CACHE_BYPASS
+    if _NOREF_CACHE_BYPASS is not None:
+        return _NOREF_CACHE_BYPASS
+    result = True   # 判定不了时按"有问题"处理：bypass 只是少复用，不会错
+    try:
+        import comfy.ldm.wan.model_animate2 as _m2
+        cls = getattr(_m2, "PoseBranchCache", None)
+        if cls is not None and hasattr(cls, "select"):
+            probe = _probe_pose_branch_cache(cls)
+            if probe is not None:
+                result = probe
+            else:
+                # 回退：源码扫描。修复版不会保留这行。
+                result = "self.slots.remove(" in inspect.getsource(cls.select)
+    except Exception:
+        pass
+    if result:
+        logging.info("[TileSchedule] core PoseBranchCache.select still has the "
+                     "list.remove bug (#16511/#16947); reference-stripped forwards "
+                     "will bypass the Qwen Image 2.1 prefix cache.")
+    else:
+        logging.info("[TileSchedule] core prefix cache looks fixed; normal logic.")
+    _NOREF_CACHE_BYPASS = result
+    return result
+
+def _uses_prefix_cache(dm):
+    """只有 Qwen Image 2.1 的 transformer 挂着这套缓存（select_prefix_cache 是它的方法）。
+    FLUX.2 / FLUX.3 / Qwen 2509/2511 在此直接放行，零开销。"""
+    return dm is not None and hasattr(dm, "select_prefix_cache")
+
+def _find_topts(args, kwargs):
+    """transformer_options 的位置：qwen2.1 的 forward 把它按位置参数传进 wrapper
+    （execute(x, t, ctx, ref_latents, image_slots, transformer_options)），也可能在 kwargs。"""
+    if isinstance(kwargs.get("transformer_options"), dict):
+        return ("kwargs", "transformer_options")
+    for i in range(len(args) - 1, -1, -1):
+        if isinstance(args[i], dict):
+            return ("args", i)
+    return (None, None)
+
+def _drop_refs_no_cache(executor, args, kwargs):
+    """摘除参考的那次前向：浅拷 transformer_options，关掉 prefix cache。
+    依据核心文档化开关：select_prefix_cache 见 options['device']=='off'
+    直接返回 (None, False) —— 该次前向既不读也不写缓存，有参考主路缓存不受影响。"""
+    if not _uses_prefix_cache(getattr(executor, "class_obj", None)):
+        return args, kwargs
+    kind, slot = _find_topts(args, kwargs)
+    if kind == "kwargs":
+        opts = dict(kwargs["transformer_options"])
+        opts["qwen_image21_cache"] = {"device": "off"}
+        kwargs = dict(kwargs); kwargs["transformer_options"] = opts
+    elif kind == "args":
+        opts = dict(args[slot])
+        opts["qwen_image21_cache"] = {"device": "off"}
+        args = args[:slot] + (opts,) + args[slot + 1:]
+    return args, kwargs
+
 
 
 def _scheduled_ref_model(model, strength_schedule):
@@ -229,15 +322,33 @@ def _scheduled_ref_model(model, strength_schedule):
     binary = all(v <= 0.001 or v >= 0.999 for v in values)
     schedule = _StepSchedule(values)
     patched = model.clone()
+    state = {"flux3_logged": False}
+    safe_strip = _noref_cache_bypass_needed()   # 核心有 bug 才隔离缓存
 
     def wrapper(executor, x, timesteps, context, *args, **kwargs):
         kind, slot = _find_ref_slot(args, kwargs)
         # QwenImageTransformer2DModel 把 ref_latents 按位置参数传入
         # (.execute(x, t, ctx, attn_mask, ref_latents, ...)，位于 args[1])，
         # _find_ref_slot 的 list/5D 张量分支均可命中；5D x 同样合法。
+
+        #------------debug-------------
+        # if not state.get("slot_logged"):
+            # state["slot_logged"] = True
+            # logging.info("[TileSchedule][debug] ref slot detected: kind=%s slot=%s",
+                         # kind, slot)
+        #-------------------------------
+        
         if kind is None or x.ndim not in (4, 5):
             return executor(x, timesteps, context, *args, **kwargs)
-        refs = args[slot] if kind == "args" else kwargs[slot]
+        if kind == "flux3":
+            refs = kwargs["ref_states"]   
+            if not state["flux3_logged"]:
+                state["flux3_logged"] = True
+                logging.info("[TileSchedule] FLUX.3 inference-mode fast path engaged "
+                             "(refs arrive as preprocessed ref_states); per-step "
+                             "reference strength control active.")
+        else:
+            refs = args[slot] if kind == "args" else kwargs[slot]
         if not _refs_are_present(refs):
             return executor(x, timesteps, context, *args, **kwargs)
         s = schedule.strength(timesteps)
@@ -245,12 +356,18 @@ def _scheduled_ref_model(model, strength_schedule):
             return executor(x, timesteps, context, *args, **kwargs)
         if binary or s <= 0.001:
             args2, kwargs2 = _set_refs(args, kwargs, kind, slot, None)
+            if safe_strip:                                       
+                args2, kwargs2 = _drop_refs_no_cache(executor, args2, kwargs2)
             return executor(x, timesteps, context, *args2, **kwargs2)
+
         # guidance：双前向 + 预测差值外推
         args2, kwargs2 = _set_refs(args, kwargs, kind, slot, None)
         out_with = executor(x, timesteps, context, *args, **kwargs)
+        if safe_strip:                                            
+            args2, kwargs2 = _drop_refs_no_cache(executor, args2, kwargs2)
         out_without = executor(x, timesteps, context, *args2, **kwargs2)
         return out_without + s * (out_with - out_without)
+
 
     options = patched.model_options.setdefault("transformer_options", {})
     comfy.patcher_extension.add_wrapper_with_key(

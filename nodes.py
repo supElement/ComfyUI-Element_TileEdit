@@ -24,6 +24,7 @@ from .common import (
     _reference_method,
     _tokenizer_handles_images,
     _is_flux2_family,
+    _is_krea2,
     _in_context_model,
     _scheduled_ref_model,
     _grounded_conditioning,
@@ -191,14 +192,18 @@ class TiledUpscale:
         positive = clip.encode_from_tokens_scheduled(clip.tokenize(prompt))
         negative = clip.encode_from_tokens_scheduled(clip.tokenize(negative_prompt))
         alignment = _pixel_alignment(model)
-        strength_values = _parse_strength_schedule(reference_strength)
-        
-        # 解析每步强度列表
+        strength_values = _parse_strength_schedule(reference_strength)  # 解析每步强度列表
+
+        if reference_mode and not _is_krea2(model.get_model_object("diffusion_model")):
+            logging.warning("[TiledUpscale] reference_mode (Krea 2 identity-edit) only applies "
+                            "to Krea 2; this model already consumes each tile as a native "
+                            "reference latent — falling back to the conditioning path.")
+            reference_mode = False
         if reference_mode:
-            model = _strip_owned_patches(model)   # schedule + in-context wrapper + extra_conds 全摘
+            model = _strip_owned_patches(model)  # schedule + in-context wrapper + extra_conds 全摘
         else:
-            model = _strip_owned_patches(model, keys=("tiled_upscale_strength_schedule",),
-                                         strip_extra_conds=False)        
+            model = _strip_owned_patches(model, keys=("tiled_upscale_strength_schedule",), strip_extra_conds=False)
+       
         if reference_mode:
             mode = "in_context"
             grounded_conditioning = False
@@ -218,9 +223,14 @@ class TiledUpscale:
                 grounded_conditioning = True
                 mode = "conditioning (grounded)"
             elif clip is not None and prompt:
-                logging.warning("[TiledUpscale] this model's text encoder is text-only (e.g. FLUX.2 "
-                                "klein's Qwen3); the tile cannot enter a vision slot, falling back to "
-                                "the reference-latent-only path with the original conditioning.")
+                dm_name = type(model.get_model_object("diffusion_model")).__name__.lower()
+                if "flux3" in dm_name:
+                    logging.info("[TiledUpscale] FLUX.3's DiT taps Qwen3-VL text-only (no vision "
+                                 "tokens); each tile rides as a native reference latent instead.")
+                else:
+                    logging.warning("[TiledUpscale] this model's text encoder is text-only (e.g. FLUX.2 "
+                                    "klein's Qwen3); the tile cannot enter a vision slot, falling back to "
+                                    "the reference-latent-only path with the original conditioning.")
     
         source = self._upscale(image, upscale_by, alignment)
         _, img_h, img_w, _ = source.shape

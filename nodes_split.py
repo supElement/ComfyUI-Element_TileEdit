@@ -10,6 +10,7 @@ from .common import (
     _reference_method,
     _tokenizer_handles_images,
     _is_flux2_family,
+    _is_krea2,
     _grounded_reference_conditioning,
     _grounded_conditioning,
     _resolve_geometry,
@@ -83,6 +84,11 @@ class ElementTileSplit:
         if negative_prompt is None:
             negative_prompt = ""
         alignment = _pixel_alignment(model)
+        if reference_mode and not _is_krea2(model.get_model_object("diffusion_model")):
+            logging.warning("[TileSplit] reference_mode is Krea 2 identity-edit only; "
+                            "falling back to the conditioning path (pair with "
+                            "ElementStrengthSchedule for per-step reference control).")
+            reference_mode = False
         if reference_mode:
             mode = "in_context"
             grounded = False
