@@ -3,6 +3,7 @@ import math
 import logging
 import inspect
 import torch
+import re
 import torch.nn.functional as F
 import comfy.sample
 import comfy.utils
@@ -112,6 +113,209 @@ def _is_flux2_family(model):
         return False
 
 # ---------------------------------------------------------------------------
+# reference_strength 每步调度
+# 语义：强度列表与 steps 一一对应。第 i 次模型前向（第 i 个采样步，0 起）取
+# 第 i 个值；列表比步数短则重复末值，比步数长则只用前段。强度只由步序号决定
+# —— timesteps 仅用于识别"下一步 / 新一轮 / 同一步"，数值不参与强度计算，
+# 因此 denoise 取任何值（只改 sigma 范围，不改前向次数）对本调度完全透明。
+# 作用方式（guidance）：pred = pred_无参考 + s * (pred_有参考 - pred_无参考)。
+# 两路前向都在训练分布内，不向参考注入任何噪声；s=1 等于原行为，s=0 该步
+# 完全无参考。全 1 列表零开销；纯 0/1 走 binary（摘除参考，单倍算力）。
+# ---------------------------------------------------------------------------
+_STRENGTH_SPLIT = re.compile(r"[,，、:：;；\s]+")
+
+def _parse_strength_schedule(value, default="1.0"):
+    """'1.0，0.9、0.7：0.5' -> [1.0, 0.9, 0.7, 0.5]（中英文逗号/顿号/冒号均可）。"""
+    if value is None:
+        value = default
+    if isinstance(value, (int, float)):
+        text = str(value)                      # 兼容直接连 FLOAT 进来
+    else:
+        text = str(value).strip()
+    if not text:
+        text = default
+    parts = [p for p in _STRENGTH_SPLIT.split(text) if p]
+    try:
+        values = [float(p) for p in parts]
+    except ValueError as e:
+        raise ValueError(
+            f"reference_strength 无法解析: {value!r}（小数请用英文句点，如 0.8）") from e
+    out = []
+    for v in values:
+        if not (0.0 <= v <= 1.0):
+            logging.warning("[TileSchedule] reference_strength=%s 超出 [0,1]，已钳制", v)
+            v = min(1.0, max(0.0, v))
+        out.append(v)
+    return out if out else [1.0]
+
+
+class _StepSchedule:
+    """按步序号查表。一次模型前向 = 一步：
+    - timestep 下降   -> 下一步（step+1）
+    - timestep 反弹   -> 新一轮采样（新 tile / redo 首块），step 归零
+    - timestep 相等   -> 同一步的另一路前向（cond/uncond 或合批），不推进
+    """
+
+    def __init__(self, values):
+        self.values = values
+        self.last_t = None
+        self.step = 0
+
+    def strength(self, timesteps):
+        t = float(timesteps.reshape(-1)[0]) if torch.is_tensor(timesteps) else float(timesteps)
+        if self.last_t is not None:
+            if t > self.last_t + 1e-6:          # 反弹 = 新一轮
+                self.step = 0
+            elif t < self.last_t - 1e-6:        # 下降 = 下一步
+                self.step += 1
+        self.last_t = t
+        return self.values[min(self.step, len(self.values) - 1)]
+
+
+def _refs_are_present(refs):
+    """判断本步是否带有参考。Krea2-conditioning 链里 ref_latents 由 Patch 的
+    extra_conds 以 CONDList 注入，到达 wrapper 时可能尚未解包成张量列表，
+    因此除 None 之外一律按"有参考"处理，避免误判为无参考而透传。"""
+    if refs is None:
+        return False
+    if torch.is_tensor(refs):
+        return True
+    if isinstance(refs, (list, tuple)):
+        return len(refs) > 0
+    return True    # CONDList 等其它参考容器：按有参考处理
+
+
+def _find_ref_slot(args, kwargs):
+    """DiT forward 各模型族的 ref 传递位置不同：Qwen/FLUX.2 把 ref_latents 按
+    位置参数传进 wrapper（execute 的第 5 个位置参数），旧版可能走 kwarg。
+    返回 ("args", i) / ("kwargs", key) / (None, None)。"""
+    for key in ("ref_latents", "reference_latents"):
+        if kwargs.get(key) is not None:
+            return ("kwargs", key)
+    for i, a in enumerate(args):
+        if torch.is_tensor(a):
+            if a.ndim == 5:                                   # (B,C,T,H,W) 参考张量
+                return ("args", i)
+        elif isinstance(a, (list, tuple)):
+            if len(a) > 0 and torch.is_tensor(a[0]):          # 参考张量列表
+                return ("args", i)
+    return (None, None)
+
+
+def _set_refs(args, kwargs, kind, slot, value):
+    """返回把 ref 槽位替换成 value（None = 摘除参考）后的 (args, kwargs)。"""
+    if kind == "args":
+        return args[:slot] + (value,) + args[slot + 1:], kwargs
+    kwargs = dict(kwargs)
+    kwargs[slot] = value
+    return args, kwargs
+
+
+def _scheduled_ref_model(model, strength_schedule):
+    """reference-latent 路径（Qwen Image 2.1 / Edit 2509/2511 / FLUX.2 等）的每步
+    参考强度调度：DIFFUSION_MODEL wrapper 在每次前向按当前步强度做预测差值引导：
+        pred = pred_无参考 + s * (pred_有参考 - pred_无参考)
+    两路前向都在训练分布内（有/无参考都是这些统一模型训练过的状态），不向参考
+    注入任何噪声。s=1 与原行为完全一致；s=0 该步完全无参考。
+    全 1 列表 -> 原样返回零开销；只含 0/1 -> binary 模式（直接摘除参考，单倍算力）；
+    含小数 -> guidance 模式（每步双前向，≈cfg=2 成本）。
+    注意 x 兼容两种形态：4D (B,C,H,W)（Qwen 2.1 / FLUX.2 klein 等图像 latent）和
+    5D (B,C,T,H,W)（Qwen Edit 2509/2511 用的 Wan21 视频式 latent，T=1）——之前只
+    放行 4D，导致 2509/2511 在这里被静默跳过、调度完全失效。
+    """
+    values = strength_schedule or [1.0]
+    if all(v >= 0.999 for v in values):
+        return model
+    binary = all(v <= 0.001 or v >= 0.999 for v in values)
+    schedule = _StepSchedule(values)
+    patched = model.clone()
+
+    def wrapper(executor, x, timesteps, context, *args, **kwargs):
+        kind, slot = _find_ref_slot(args, kwargs)
+        # QwenImageTransformer2DModel 把 ref_latents 按位置参数传入
+        # (.execute(x, t, ctx, attn_mask, ref_latents, ...)，位于 args[1])，
+        # _find_ref_slot 的 list/5D 张量分支均可命中；5D x 同样合法。
+        if kind is None or x.ndim not in (4, 5):
+            return executor(x, timesteps, context, *args, **kwargs)
+        refs = args[slot] if kind == "args" else kwargs[slot]
+        if not _refs_are_present(refs):
+            return executor(x, timesteps, context, *args, **kwargs)
+        s = schedule.strength(timesteps)
+        if s >= 0.999:
+            return executor(x, timesteps, context, *args, **kwargs)
+        if binary or s <= 0.001:
+            args2, kwargs2 = _set_refs(args, kwargs, kind, slot, None)
+            return executor(x, timesteps, context, *args2, **kwargs2)
+        # guidance：双前向 + 预测差值外推
+        args2, kwargs2 = _set_refs(args, kwargs, kind, slot, None)
+        out_with = executor(x, timesteps, context, *args, **kwargs)
+        out_without = executor(x, timesteps, context, *args2, **kwargs2)
+        return out_without + s * (out_with - out_without)
+
+    options = patched.model_options.setdefault("transformer_options", {})
+    comfy.patcher_extension.add_wrapper_with_key(
+        comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL,
+        "tiled_upscale_strength_schedule", wrapper, options)
+    _promote_wrapper_key(options, "tiled_upscale_strength_schedule")
+    return patched
+
+
+# ---------------------------------------------------------------------------
+# 上游自产 patch 的摘除（防叠加）
+# 若上游已挂过（如 loader -> ElementStrengthSchedule -> TiledUpscale），
+# 同一参考会被处理两次。摘除后重挂 = 后挂者生效。
+# ---------------------------------------------------------------------------
+_ELEMENT_PATCH_KEYS = ("tiled_upscale_strength_schedule",
+                       "tiled_upscale_in_context",
+                       "tiled_upscale_in_context_cond")
+
+def _strip_owned_patches(model, keys=_ELEMENT_PATCH_KEYS, strip_extra_conds=True):
+    """clone 模型并摘除 keys 指定的 wrapper，以及本扩展标记过的 extra_conds
+    object patch。core 的 ModelPatcher.clone() 会深拷贝 model_options、浅拷贝
+    object_patches，因此删除只作用于克隆体，上游 ModelPatcher 不受影响。"""
+    patched = model.clone()
+    removed = []
+    topts = patched.model_options.get("transformer_options")
+    if isinstance(topts, dict):
+        wrappers = topts.get("wrappers")
+        if isinstance(wrappers, dict):
+            dm = wrappers.get(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL)
+            if isinstance(dm, dict):
+                for key in keys:
+                    if key in dm:
+                        del dm[key]
+                        removed.append(key)
+    if strip_extra_conds:
+        fn = patched.object_patches.get("extra_conds")
+        if fn is not None and getattr(fn, "_element_krea2_extra_conds", False):
+            del patched.object_patches["extra_conds"]
+            removed.append("extra_conds(krea2)")
+    if removed:
+        logging.info("[Element] removed upstream patches %s before applying own logic.", removed)
+    return patched
+
+def _promote_wrapper_key(options, key):
+    """把 key 指定的 DIFFUSION_MODEL wrapper 移到执行链最外层。
+    core 事实（patcher_extension.py）：get_all_wrappers 按 wrapper key 的插入
+    顺序展平成列表，WrapperExecutor 从列表首位开始执行（首位 = 最外层）。
+    上游 Krea2 In-Context Patch 的 wrapper 在参考存在时会短路内层（不调用
+    executor、直接手动跑 DiT），调度 wrapper 必须位于其外侧才能先摘下参考
+    槽位做逐步引导，否则调度会静默失效。"""
+    wrappers = options.get("wrappers")
+    if not isinstance(wrappers, dict):
+        return
+    dm = wrappers.get(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL)
+    if not isinstance(dm, dict) or key not in dm:
+        return
+    if next(iter(dm)) == key:          
+        return
+    ours = dm.pop(key)
+    reordered = {key: ours}
+    reordered.update(dm)
+    wrappers[comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL] = reordered
+
+
+# ---------------------------------------------------------------------------
 # Krea 2 identity-edit in-context path. Layout follows ComfyUI-Krea2Edit
 # ---------------------------------------------------------------------------
 
@@ -141,14 +345,9 @@ def _to_4d(latent):
 
 
 def _krea2_in_context_forward(dm, x, timesteps, context, source, transformer_options):
-    """
-    Krea 2's forward with the source latent prepended as a block of clean tokens. ComfyUI's
-    native Krea 2 forward is text-to-image: `[text | target]`, with reference latents appended
-    *after* the target and given their own timestep-zero modulation. The Krea 2 edit LoRAs are
-    trained the other way round, on `[text | source(frame=1) | target(frame=0)]` with one shared
-    timestep, the source told apart from the noisy target only by its RoPE frame index, so the
-    native path produces noise with them. This rebuilds the sequence the way they expect.
-    """
+    """Krea 2 identity-edit 前向：[text | source(frame=1) | target(frame=0)]。
+    source=None 时构建原生 T2I 布局 [text | target(frame=0)]（= base 模型的
+    训练前向），供 guidance 模式的无参考路使用。任何情况下不修改 source 数值。"""
     patch = dm.patch
     temporal = x.ndim == 5
     if temporal:
@@ -158,42 +357,42 @@ def _krea2_in_context_forward(dm, x, timesteps, context, source, transformer_opt
     x = comfy.ldm.common_dit.pad_to_patch_size(x, (patch, patch))
     height, width = x.shape[-2:]
     h_, w_ = height // patch, width // patch
-
-    src = _to_4d(source).to(device=x.device, dtype=x.dtype)
-    if src.shape[0] != batch:
-        src = src[:1].expand(batch, *src.shape[1:])
-    if src.shape[-2:] != (height, width):
-        src = F.interpolate(src.float(), size=(height, width), mode="bilinear").to(x.dtype)
-    src = comfy.ldm.common_dit.pad_to_patch_size(src, (patch, patch))
-
-    to_tokens = lambda t: dm.first(rearrange(t, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch, pw=patch))
+    to_tokens = lambda t: dm.first(rearrange(t, "b c (h ph) (w pw) -> b (h w) (c ph pw)",
+                                             ph=patch, pw=patch))
     target_tokens = to_tokens(x)
-    source_tokens = to_tokens(src)
-
+    if source is not None:
+        src = _to_4d(source).to(device=x.device, dtype=x.dtype)
+        if src.shape[0] != batch:
+            src = src[:1].expand(batch, *src.shape[1:])
+        if src.shape[-2:] != (height, width):
+            src = F.interpolate(src.float(), size=(height, width), mode="bilinear").to(x.dtype)
+        src = comfy.ldm.common_dit.pad_to_patch_size(src, (patch, patch))
+        source_tokens = to_tokens(src)
+    else:
+        source_tokens = None
     t = dm.tmlp(timestep_embedding(timesteps, dm.tdim).unsqueeze(1).to(target_tokens.dtype))
     tvec = dm.tproj(t)
-
     context = dm.txtfusion(dm._unpack_context(context), mask=None, transformer_options=transformer_options)
     context = dm.txtmlp(context)
-
-    txt_len, src_len, tgt_len = context.shape[1], source_tokens.shape[1], target_tokens.shape[1]
-    combined = torch.cat([context, source_tokens, target_tokens], dim=1)
-
-    device = combined.device
-    pos = torch.cat([torch.zeros(batch, txt_len, 3, device=device, dtype=torch.float32),
-                     _img_ids(batch, 1, h_, w_, device),
-                     _img_ids(batch, 0, h_, w_, device)], dim=1)
+    txt_len, tgt_len = context.shape[1], target_tokens.shape[1]
+    src_len = 0 if source_tokens is None else source_tokens.shape[1]
+    if source_tokens is not None:
+        combined = torch.cat([context, source_tokens, target_tokens], dim=1)
+        pos = torch.cat([torch.zeros(batch, txt_len, 3, device=combined.device, dtype=torch.float32),
+                         _img_ids(batch, 1, h_, w_, combined.device),
+                         _img_ids(batch, 0, h_, w_, combined.device)], dim=1)
+    else:
+        combined = torch.cat([context, target_tokens], dim=1)
+        pos = torch.cat([torch.zeros(batch, txt_len, 3, device=combined.device, dtype=torch.float32),
+                         _img_ids(batch, 0, h_, w_, combined.device)], dim=1)
     freqs = dm.pe_embedder(pos)
-
     transformer_options = dict(transformer_options)
     transformer_options["total_blocks"] = len(dm.blocks)
     transformer_options["block_type"] = "single"
     transformer_options["img_slice"] = [txt_len + src_len, combined.shape[1]]
-
     for index, block in enumerate(dm.blocks):
         transformer_options["block_index"] = index
         combined = block(combined, tvec, freqs, None, transformer_options=transformer_options)
-
     final = dm.last(combined, t)
     out = final[:, txt_len + src_len:txt_len + src_len + tgt_len, :]
     out = rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=h_, w=w_, ph=patch, pw=patch, c=dm.channels)
@@ -203,13 +402,12 @@ def _krea2_in_context_forward(dm, x, timesteps, context, source, transformer_opt
     return out
 
 
-def _in_context_model(model, source_holder):
-    """
-    Clone the model with a forward that reads the current tile out of `source_holder`. Cloned once
-    rather than per tile: a fresh ModelPatcher would make ComfyUI re-apply every LoRA patch for
-    each tile, and these models are always LoRA-patched.
-    """
+def _in_context_model(model, source_holder, strength_schedule=None):
+    """source_holder 驱动的 Krea 2 in-context 前向；strength_schedule 非 None 时
+    按当前步强度做 guidance 差值（有 source / 无 source 两路都在分布内）。"""
     patched = model.clone()
+    values = strength_schedule or [1.0]
+    schedule = None if all(v >= 0.999 for v in values) else _StepSchedule(values)
 
     def wrapper(executor, x, timesteps, context, *args, **kwargs):
         source = source_holder["latent"]
@@ -218,12 +416,23 @@ def _in_context_model(model, source_holder):
         options = kwargs.get("transformer_options")
         if options is None:
             options = next((arg for arg in reversed(args) if isinstance(arg, dict)), {})
-        return _krea2_in_context_forward(executor.class_obj, x, timesteps, context, source, options)
+        dm = executor.class_obj
+        if schedule is None:
+            return _krea2_in_context_forward(dm, x, timesteps, context, source, options)
+        s = schedule.strength(timesteps)
+        if s >= 0.999:
+            return _krea2_in_context_forward(dm, x, timesteps, context, source, options)
+        if s <= 0.001:
+            return _krea2_in_context_forward(dm, x, timesteps, context, None, options)
+        out_with = _krea2_in_context_forward(dm, x, timesteps, context, source, options)
+        out_without = _krea2_in_context_forward(dm, x, timesteps, context, None, options)
+        return out_without + s * (out_with - out_without)
 
     options = patched.model_options.setdefault("transformer_options", {})
     comfy.patcher_extension.add_wrapper_with_key(
         comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL,
-        "tiled_upscale_in_context", wrapper, options)
+        "tiled_upscale_strength_schedule", wrapper, options)
+    _promote_wrapper_key(options, "tiled_upscale_strength_schedule")
     return patched
 
 
@@ -235,13 +444,9 @@ _GROUNDING_TEMPLATE = (
 )
 
 
-def _grounded_conditioning(clip, prompt, image, grounding_px, reference_strength=1.0):
-    """
-    Encode the prompt with one tile as the text encoder's vision input. The Krea 2 edit LoRAs see
-    the source twice during training: as latent tokens (appearance) and inside the text encoder's
-    user turn (semantics). Grounding per tile keeps both paths talking about the same pixels.
-    """
-    image = _relaxed_reference_pixels(image, reference_strength, keep_size=True)
+def _grounded_conditioning(clip, prompt, image, grounding_px):
+    """（原 docstring 保留）vision 槽不做静态放松：reference_strength 已改为
+    逐步调度，只作用于 latent 参考通道；进 vision 槽的永远是原始 tile 像素。"""
     samples = image.movedim(-1, 1)
     h, w = samples.shape[2], samples.shape[3]
     if grounding_px and max(h, w) > grounding_px:
@@ -253,20 +458,14 @@ def _grounded_conditioning(clip, prompt, image, grounding_px, reference_strength
     return [[entry[0].to("cpu"), {k: (v.to("cpu") if torch.is_tensor(v) else v) for k, v in entry[1].items()}]
             for entry in conditioning]
 
+
 def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_px,
-                                     reference_method=None, encode_negative=False,
-                                     qwen21=False, reference_strength=1.0,
-                                     global_pixels=None, global_ref_latent=None,
-                                     negative_prompt=""):
+                                     reference_method=None, encode_negative=False, qwen21=False,
+                                     global_pixels=None, global_ref_latent=None, negative_prompt=""):
     samples = tile_pixels[:1].movedim(-1, 1)
     dual = global_pixels is not None and global_ref_latent is not None
     if qwen21:
-        # Qwen Image 2.1: 文本编码器把 vision token 从 conditioning 中丢弃, 只记录位置 image_slots;
-        # DiT 在这些位置拼接 reference latent (build_sequence)。参考 latent 的尺寸是自由的——每个
-        # ref 贡献的 token 数由它自己的 h,w 决定——但官方节点保持"第一张参考 = 输出尺寸"(其它尺寸
-        # 会移动编辑结果), 且每张参考的 vision 图与 VAE latent 必须来自同一份像素(槽位跨度与拼接块
-        # 对齐)。因此: tile 参考放第一、保持 tile 原尺寸; 全局参考放第二、用它自己更小的尺寸。
-        s = _relaxed_reference_pixels(tile_pixels[:1], reference_strength, keep_size=True)
+        s = tile_pixels[:1]
         t_rgb = s[:, :, :, :3]
         if s.shape[-1] > 3:
             t_rgb = t_rgb * s[:, :, :, 3:] + (1.0 - s[:, :, :, 3:])
@@ -286,9 +485,8 @@ def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_p
         positive = clip.encode_from_tokens_scheduled(
             clip.tokenize(full_prompt, images=images, prevent_empty_text=True))
     else:
-        # 2509/2511 的参考 latent 是多图参考之一, 尺寸可与输出不同,
-        # 直接喂一张真正缩小过的参考, 模型会自由地重新放大它。
-        ref_latents = [vae.encode(_relaxed_reference_pixels(tile_pixels[:1], reference_strength))]
+        # 2509/2511：静态放松已移除，参考 = 原始 tile latent，削弱由前向内的调度完成
+        ref_latents = [vae.encode(tile_pixels[:1])]
         total = int(384 * 384) if grounding_px <= 0 or grounding_px >= 384 else int(grounding_px * grounding_px)
         scale_by = math.sqrt(total / (samples.shape[3] * samples.shape[2]))
         width = max(1, round(samples.shape[3] * scale_by))
@@ -300,12 +498,10 @@ def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_p
         images = [rgb]
         positive = clip.encode_from_tokens_scheduled(
             clip.tokenize("Picture 1: " + prompt, images=images, prevent_empty_text=True))
-
     extra = {"reference_latents": ref_latents}
     if reference_method is not None:
         extra["reference_latents_method"] = reference_method
     positive = node_helpers.conditioning_set_values(positive, extra, append=True)
-
     negative = None
     if encode_negative:
         negative = clip.encode_from_tokens_scheduled(
@@ -318,10 +514,8 @@ def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_p
         if isinstance(v, list):
             return [_to_cpu_deep(t) for t in v]
         return v
-
     park = lambda cond: [[e[0].to("cpu"), {k: _to_cpu_deep(v) for k, v in e[1].items()}] for e in cond]
     return park(positive), (park(negative) if negative is not None else None)
-
 
 
 def _build_dual_ref_conditioning(clip, prompt, vae, global_pixels, tile_pixels, grounding_px,
@@ -364,7 +558,7 @@ def _build_dual_ref_conditioning(clip, prompt, vae, global_pixels, tile_pixels, 
         height = max(1, round(samples.shape[2] * scale_by))
         vl = comfy.utils.common_upscale(samples, width, height, "area", "disabled").movedim(1, -1)
         rgb = vl[:, :, :, :3]
-        if vl.shape[-1] > 3:                      # 检查切之前的通道数
+        if vl.shape[-1] > 3:                     
             rgb = rgb * vl[:, :, :, 3:] + (1.0 - vl[:, :, :, 3:])
         return rgb
 

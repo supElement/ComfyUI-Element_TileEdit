@@ -32,5 +32,11 @@ try:
     _register("ElementKrea2InContextPatch", ElementKrea2InContextPatch, "Element Krea2 In-Context Patch")
 except Exception:
     logging.warning("[Element TileUpscale] ElementKrea2InContextPatch failed to load:\n%s", traceback.format_exc())
+    
+try:
+    from .nodes_patch import ElementStrengthSchedule
+    _register("ElementStrengthSchedule", ElementStrengthSchedule, "Element Strength Schedule")
+except Exception:
+    logging.warning("[Element TileUpscale] ElementStrengthSchedule failed to load:\n%s", traceback.format_exc())
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
