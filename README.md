@@ -195,7 +195,7 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 
 可以使用另一个扩展中的 [Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 替代，Smart merge images 对色彩和畸变校正的处理结果更好。Smart merge images 支持局部图像拼接，可用下方工作流修复局部画面。
 
-<img width="2454" height="897" alt="ElementTiledUpscale_Krea2_area_repair" src="https://github.com/user-attachments/assets/509a9d1f-3be5-49d3-ac66-192f5a8e005a" />
+<img width="2451" height="893" alt="image" src="https://github.com/user-attachments/assets/d5cab444-de86-4afb-92d4-0af5199408a8" />
 
 ---
 
