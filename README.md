@@ -92,6 +92,26 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
   以上测试数量有限，存在片面和主观因素，还是要根据不同情况来调整参数。当然，你也可以通过使用增强lora，或使用微调模型来改善结果，但这不在测试范围内。  
 ---
 
+## 全局提示词（重要）
+
+本节点会把同一份提示词用于每一个分块的文本编码，而每个分块只包含整张图的一小片区域。区域里有什么内容，是由参考图（像素特征）决定的；提示词只负责告诉模型“怎么处理”这些内容。 因此，提示词只应写“对所有分块都成立”的内容：
+
+### ✅ 应该写
+
+**1. 操作指令** —— 告诉模型这次采样要做什么（对每个分块都成立）：
+- `sharpen and refine details, preserve identity and structure, clean upscale`
+
+**2. 全局风格 / 光照 / 色调** —— 整张图共有的氛围（对每个分块也都成立）：
+- `cool blue ambient lighting, warm orange rim light, cinematic tone, photorealistic`
+
+### ❌ 不应该写
+
+**具体物体、人物、场景名词**（如 `woman at a computer, glasses, monitor, coffee cup`）：
+
+### 推荐模板
+
+- `sharpen and refine, preserve identity and structure, {全局色调/光照/风格}, {画质词}`
+
 ## 📦 安装
 
 ### 方式一：手动安装（Manual Installation）
