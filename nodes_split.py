@@ -15,6 +15,7 @@ from .common import (
     _grounded_conditioning,
     _resolve_geometry,
     _plan_tiles,
+    _plan_tiles_count,
 )
 
 
@@ -51,7 +52,12 @@ class ElementTileSplit:
                 "image": ("IMAGE",),
                 "vae": ("VAE",),
                 "clip": ("CLIP",),
-                "upscale_by": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 8.0, "step": 0.05}),
+                "upscale_by": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 16.0, "step": 0.05}),
+                "tile_mode": ("BOOLEAN", {"default": True, "label_on": "by count", "label_off": "by size",
+                                          "tooltip": "On: grid driven by columns/rows. Off: grid driven by tile_size."}),
+                "columns": ("INT", {"default": 2, "min": 1, "max": 16, "step": 1, "tooltip": "Tile columns across the width."}),
+                "rows": ("INT", {"default": 2, "min": 1, "max": 16, "step": 1, "tooltip": "Tile rows down the height."}),
+
                 "tile_size": ("INT", {"default": 0, "min": 0, "max": 4096, "step": 16,
                     "tooltip": "Resolution each tile is regenerated at. 0 picks one from the output size: "
                                "about four tiles along the longest side, kept between 1024 and 1536."
@@ -76,7 +82,8 @@ class ElementTileSplit:
         }
 
     
-    def split(self, model, image, vae, upscale_by, tile_size, overlap, reference_mode, grounding_px, clip=None, prompt="enhance quality preserving all the details", negative_prompt=""):
+    def split(self, model, image, vae, upscale_by, tile_size, overlap, reference_mode, grounding_px, clip=None, 
+              prompt="enhance quality preserving all the details", negative_prompt="", tile_mode=True, columns=2, rows=2):
         if clip is None:
             raise ValueError(
                 "ElementTileSplit:'clip' is not connected. The positive/negative input ports have been removed."
@@ -111,9 +118,14 @@ class ElementTileSplit:
             bchw = torch.nn.functional.pad(bchw, (0, pad_w, 0, pad_h), mode="replicate")
             source = bchw.permute(0, 2, 3, 1)
         work_h, work_w = img_h + pad_h, img_w + pad_w
-    
-        tile_size, overlap, _, _ = _resolve_geometry(work_w, work_h, tile_size, overlap, alignment)
-        tiles, num_x, num_y = _plan_tiles(work_h, work_w, tile_size, overlap)
+        if tile_mode:
+            tiles, num_x, num_y, tile_size, overlap = _plan_tiles_count(
+                work_h, work_w, columns, rows, alignment, overlap)
+        else:
+            tile_size, overlap, _, _ = _resolve_geometry(
+                work_w, work_h, tile_size, overlap, alignment)
+            tiles, num_x, num_y = _plan_tiles(work_h, work_w, tile_size, overlap)
+
         total_tiles = len(tiles)
         pbar = comfy.utils.ProgressBar(total_tiles)
         logging.info("[TileSplit] %s | %d tile(s) | tile=%dx%d overlap=%d",

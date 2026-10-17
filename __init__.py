@@ -4,6 +4,9 @@ import traceback
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
+WEB_DIRECTORY = "./web"
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+
 
 def _register(name, cls, display):
     NODE_CLASS_MAPPINGS[name] = cls

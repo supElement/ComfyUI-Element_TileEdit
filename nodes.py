@@ -31,6 +31,7 @@ from .common import (
     _grounded_reference_conditioning,
     _resolve_geometry,
     _plan_tiles,
+    _plan_tiles_count,
     _tile_weight,
     _detail_weight,
     _split_frequencies,
@@ -81,7 +82,13 @@ class TiledUpscale:
                 "vae": ("VAE",),
                 "image": ("IMAGE",),
                 "clip": ("CLIP", ),
-                "upscale_by": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 8.0, "step": 0.05}),
+                "upscale_by": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 16.0, "step": 0.05}),
+                
+                "tile_mode": ("BOOLEAN", {"default": True, "label_on": "by count", "label_off": "by size",
+                                          "tooltip": "On: grid driven by columns/rows. Off: grid driven by tile_size."}),
+                "columns": ("INT", {"default": 2, "min": 1, "max": 16, "step": 1, "tooltip": "Tile columns across the width."}),
+                "rows": ("INT", {"default": 2, "min": 1, "max": 16, "step": 1, "tooltip": "Tile rows down the height."}),
+
                 "tile_size": ("INT", {"default": 0, "min": 0, "max": 4096, "step": 16,
                     "tooltip": "Resolution each tile is regenerated at. 0 picks one from the output size: "
                                "about four tiles along the longest side, kept between 1024 and 1536."
@@ -92,7 +99,7 @@ class TiledUpscale:
                                "cap. Higher = smoother seams but more compute."}),
                 "feather": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "steps": ("INT", {"default": 4, "min": 1, "max": 10000}),
+                "steps": ("INT", {"default": 8, "min": 1, "max": 10000}),
                 "cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS, {"default": "euler"}),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS, {"default": "simple"}),
@@ -181,7 +188,9 @@ class TiledUpscale:
 
 
     
-    def refine(self, model, vae, image, upscale_by, tile_size, overlap, feather, seed, steps, cfg, sampler_name, scheduler, denoise, reference_mode=False, redo_first_tile=True, grounding_px=768, clip=None, prompt="enhance quality preserving all the details", negative_prompt="", reference_strength="1.0,1.0,0.95,0.9,0.8"):
+    def refine(self, model, vae, image, upscale_by, tile_size, overlap, feather, seed, steps, cfg, sampler_name, scheduler, denoise, 
+               reference_mode=False, redo_first_tile=True, grounding_px=768, clip=None, prompt="enhance quality preserving all the details", 
+               negative_prompt="", reference_strength="1.0,1.0,0.95,0.9,0.8", tile_mode=True, columns=2, rows=2):
         if clip is None:
             raise ValueError(
                 "TiledUpscale: 'clip' is not connected. The positive/negative input ports have been removed."
@@ -244,8 +253,12 @@ class TiledUpscale:
             source = bchw.permute(0, 2, 3, 1)
         work_h, work_w = img_h + pad_h, img_w + pad_w
     
-        tile_size, overlap, auto_tile, auto_overlap = _resolve_geometry(work_w, work_h, tile_size, overlap, alignment)
-        tiles, num_x, num_y = _plan_tiles(work_h, work_w, tile_size, overlap)
+        if tile_mode:
+            tiles, num_x, num_y, tile_size, overlap = _plan_tiles_count(work_h, work_w, columns, rows, alignment, overlap)
+        else:
+            tile_size, overlap, auto_tile, auto_overlap = _resolve_geometry(work_w, work_h, tile_size, overlap, alignment)
+            tiles, num_x, num_y = _plan_tiles(work_h, work_w, tile_size, overlap)
+
         logging.info("[TiledUpscale] branch=%s | tokenizer=%s | vision=%s | %d tile(s) | strength schedule=%s.",
                      mode, type(getattr(clip, "tokenizer", None)).__name__ if clip is not None else "none",
                      _tokenizer_handles_images(clip) if clip is not None else False,

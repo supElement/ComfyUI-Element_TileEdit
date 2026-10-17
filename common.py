@@ -804,6 +804,62 @@ def _plan_tiles(img_h, img_w, tile_size, overlap):
             tile_id += 1
     return tiles, len(cols), len(rows)
 
+def _plan_tiles_count(img_h, img_w, w_tiles, h_tiles, alignment, overlap=0):
+    """Fixed-count variant of _plan_tiles: exactly w_tiles columns x h_tiles rows,
+    evenly spaced so every gap between neighbours is identical (same fade
+    bookkeeping as _plan_tiles). overlap=0 -> auto: 15% of the tile size, capped
+    at 256px (same rule as _resolve_geometry); any overlap >= tile is clamped.
+    Returns (tiles, num_x, num_y, tile_size, overlap); tile_size is the larger
+    axis tile, reported for logging/grid bookkeeping only."""
+    w_tiles = max(1, int(w_tiles or 1))
+    h_tiles = max(1, int(h_tiles or 1))
+
+    def _axis_tile(size, count):
+        # smallest token-aligned tile that lets `count` tiles cover one axis
+        return max(alignment, math.ceil(size / count / alignment) * alignment)
+
+    tile_w = _axis_tile(img_w, w_tiles)
+    tile_h = _axis_tile(img_h, h_tiles)
+
+    if overlap <= 0:
+        overlap = min(256, round(min(tile_w, tile_h) * 2 * _EDGE_FALLOFF / alignment) * alignment)
+    overlap = max(0, min(overlap, max(min(tile_w, tile_h) - alignment, 0)))
+
+    def _axis_positions(size, count):
+        if count <= 1:
+            return [(0, size)]
+        # grow the tile just enough that exactly `count` evenly spaced tiles cover the axis
+        tile = max(alignment, math.ceil((size + (count - 1) * overlap) / count / alignment) * alignment)
+        tile = min(tile, size)
+        span = size - tile
+        if span <= 0:
+            return [(0, size)]
+        return [(round(i * span / (count - 1)), tile) for i in range(count)]
+
+    cols = _axis_positions(img_w, w_tiles)
+    rows = _axis_positions(img_h, h_tiles)
+    row_fades = _axis_fades(rows)
+    col_fades = _axis_fades(cols)
+    tiles = []
+    tile_id = 0
+    for r, (y, h) in enumerate(rows):
+        for c, (x, w) in enumerate(cols):
+            tiles.append({
+                "tile_id": tile_id,
+                "row": r,
+                "col": c,
+                "x": x,
+                "y": y,
+                "width": w,
+                "height": h,
+                "fade_top": row_fades[r][0],
+                "fade_bottom": row_fades[r][1],
+                "fade_left": col_fades[c][0],
+                "fade_right": col_fades[c][1],
+            })
+            tile_id += 1
+    return tiles, len(cols), len(rows), max(tile_w, tile_h), overlap
+
 
 def _match_channels(image, channels):
     """
