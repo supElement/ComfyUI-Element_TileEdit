@@ -190,8 +190,14 @@ Reassembles the list of image tiles **after decoding** back into a full image. T
 
 **Output**: Merged full image.
 
-Another node from an extension, [Smart merge images node](https://github.com/supElement/ComfyUI_Element_easy), can be used as a replacement, as Smart merge images provides better results for color and distortion correction.
+Another node from an extension, [Smart merge images node](https://github.com/supElement/ComfyUI_Element_easy), can be used as a replacement, as Smart merge images provides better results for color and distortion correction. Smart merge images support partial image splicing, and you can use the workflow below to repair partial images.
+
+<img width="2454" height="897" alt="ElementTiledUpscale_Krea2_area_repair" src="https://github.com/user-attachments/assets/509a9d1f-3be5-49d3-ac66-192f5a8e005a" />
+
 ## Common Issues
+
+**How to use it? **
+Related workflows are provided in the workflow folder.
 
 **Insufficient VRAM?**
 Reduce `tile_size` (more tiles, smaller each). Edit 2509/2511 can further reduce `grounding_px`; Qwen 2.1's `grounding_px` is not involved in the calculation, only `tile_size` can be reduced.
