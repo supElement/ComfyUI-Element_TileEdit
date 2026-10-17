@@ -193,11 +193,16 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 
 **输出**：拼合完成的整图。
 
-可以使用另一个扩展中的 [Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 替代，Smart merge images 对色彩和畸变校正的处理结果更好。
+可以使用另一个扩展中的 [Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 替代，Smart merge images 对色彩和畸变校正的处理结果更好。Smart merge images 支持局部图像拼接，可用下方工作流修复局部画面。
+
+<img width="2454" height="897" alt="ElementTiledUpscale_Krea2_area_repair" src="https://github.com/user-attachments/assets/509a9d1f-3be5-49d3-ac66-192f5a8e005a" />
 
 ---
 
 ## 常见问题
+
+**怎么用？**
+workflow文件夹中已提供相关工作流。  
 
 **显存不够？**
 减小 tile_size（分块更多、单块更小）。Edit 2509/2511 可额外降低 grounding_px；Qwen 2.1 的 grounding_px 不参与计算，只能减小 tile_size。
