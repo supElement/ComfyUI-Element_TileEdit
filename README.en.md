@@ -94,7 +94,7 @@ The above tests are limited in number and have biases and subjective factors, so
 
 ## Global Prompt (Important)
 
-This node will use the same prompt for every text encoding of the tiles, and each tile only contains a small area of the entire image. What is in the area is determined by the reference image (pixel features); the prompt only tells the model "how to process" this content. Therefore, the prompt should only contain content that applies to all tiles:
+This node will use the same prompt for every text encoding of the tiles, and each tile only contains a small area of the entire image. What is in the area is determined by the reference image (pixel features); the prompt only tells the model "how to process" this content. Therefore, tips should only contain core principles that apply to all tiles:
 
 ### ✅ Should Write
 
@@ -106,7 +106,7 @@ This node will use the same prompt for every text encoding of the tiles, and eac
 
 ### ❌ Should Not Write
 
-**Specific object, character, scene nouns** (e.g., `woman at a computer, glasses, monitor, coffee cup`):
+**Specific object, character, scene nouns** (e.g., `woman at a computer, glasses, monitor, coffee cup`)，Unless you can be sure that each chunk contains the specific object element in the prompt word:
 
 ### Recommended Template
 
@@ -190,9 +190,11 @@ Reassembles the list of image tiles **after decoding** back into a full image. T
 
 **Output**: Merged full image.
 
-Another node from an extension, [Smart merge images node](https://github.com/supElement/ComfyUI_Element_easy), can be used as a replacement, as Smart merge images provides better results for color and distortion correction. Smart merge images support partial image splicing, and you can use the workflow below to repair partial images.
+Another node from an extension, [Smart merge images node](https://github.com/supElement/ComfyUI_Element_easy), can be used as a replacement, as Smart merge images provides better results for color and distortion correction. 
+Smart merge images support partial image splicing, and you can use the workflow below to repair partial images.
+Note that although the prompt words here write specific object elements, they follow the core principle of **established in each block**.
 
-<img width="2454" height="897" alt="ElementTiledUpscale_Krea2_area_repair" src="https://github.com/user-attachments/assets/509a9d1f-3be5-49d3-ac66-192f5a8e005a" />
+<img width="2451" height="893" alt="image" src="https://github.com/user-attachments/assets/d5cab444-de86-4afb-92d4-0af5199408a8" />
 
 ## Common Issues
 
