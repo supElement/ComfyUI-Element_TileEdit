@@ -110,7 +110,7 @@ This node will use the same prompt for every text encoding of the tiles, and eac
 
 ### Recommended Template
 
-- `sharpen and refine, preserve identity and structure, {全局色调/光照/风格}, {画质词}`
+- `sharpen and refine, preserve identity and structure, {global tone/lighting/style}, {image quality word}`
 
 ## 📦 Installation
 
