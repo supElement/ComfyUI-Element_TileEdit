@@ -136,7 +136,10 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 |---|---|
 | **model / vae / image / clip** | 基础四件套。clip 必接：逐块 conditioning 由它编码，positive / negative 输入端口已移除 |
 | **upscale_by** | 放大倍率，1.0 = 只做重采样精修不放大 |
-| **tile_size** | 每块的重采样分辨率。0 = 自动（长边约 4 块，1024–1536）。块越大总块数越少、单块耗时越长。identity-edit LoRA 下每块请 ≤ 2MP |
+| **tile_mode** | 分块方法：开 by count，关 by size |
+| **columons** | tile_mode 开时（by count）才显示这个参数。宽度平分数量 |
+| **rows** | tile_mode 开时（by count）才显示这个参数。高度平分数量 |
+| **tile_size** | tile_mode 关时（by size）才显示这个参数。每块的重采样分辨率。0 = 自动（长边约 4 块，1024–1536）。块越大总块数越少、单块耗时越长。identity-edit LoRA 下每块请 ≤ 2MP |
 | **overlap** | 相邻切片间的重叠量。0 = 自动：切片尺寸的 15%，上限为 256px（取两者中的较小值）。任何非零值将按原样使用，不设上限。数值越高，接缝越平滑，但计算开销越大（开销随重叠量呈二次方增长） |
 | **feather** | 块间融合的羽化强度，1.0 = 最大平滑，一般不动 |
 | **steps / cfg / sampler / scheduler / denoise / seed** | 与 KSampler 同义，直接套用该模型的官方推荐值 |
@@ -170,8 +173,10 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 | 参数 | 说明 |
 |---|---|
 | **model / image / vae / clip** | clip 必接，positive / negative 输入端口已移除，逐块 conditioning 由 clip + prompt / negative_prompt 编码 |
-| **upscale_by** | 同上 |
-| **tile_size / overlap** | 同上（tooltip 中含 ≤2MP 提示） |
+| **tile_mode** | 分块方法：开 by count，关 by size |
+| **columons** | tile_mode 开时（by count）才显示这个参数。宽度平分数量 |
+| **rows** | tile_mode 开时（by count）才显示这个参数。高度平分数量 |
+| **tile_size** | tile_mode 关时（by size）才显示这个参数。每块的重采样分辨率。0 = 自动（长边约 4 块，1024–1536）。块越大总块数越少、单块耗时越长。identity-edit LoRA 下每块请 ≤ 2MP |
 | **reference_mode** | 开 = Krea 2 identity-edit：逐块输出 vision 槽 grounding + 参考 latent 双通道条件，参考同时挂正负两侧；**必须配合 Patch 节点**（Split 自身不重建前向）。关 = 通用 conditioning 路径 |
 | **grounding_px / prompt / negative_prompt** | 含义与一体化节点相同。Split 没有 reference_strength 参数：逐步强度调度请用 **Element Strength Schedule** 节点挂在 model 上（其输出接 KSampler 的 model 输入） |
 
