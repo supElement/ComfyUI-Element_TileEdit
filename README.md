@@ -94,7 +94,7 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 
 ## 全局提示词（重要）
 
-本节点会把同一份提示词用于每一个分块的文本编码，而每个分块只包含整张图的一小片区域。区域里有什么内容，是由参考图（像素特征）决定的；提示词只负责告诉模型“怎么处理”这些内容。 因此，提示词只应写“对所有分块都成立”的内容：
+本节点会把同一份提示词用于每一个分块的文本编码，而每个分块只包含整张图的一小片区域。区域里有什么内容，是由参考图（像素特征）决定的；提示词只负责告诉模型“怎么处理”这些内容。 因此，提示词应遵从“对所有分块都成立”的核心原则：
 
 ### ✅ 应该写
 
@@ -106,7 +106,7 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 
 ### ❌ 不应该写
 
-**具体物体、人物、场景名词**（如 `woman at a computer, glasses, monitor, coffee cup`）：
+**具体物体、人物、场景名词**（如 `woman at a computer, glasses, monitor, coffee cup`），除非你能确定提示词中描述的物体元素对所有分块都成立：
 
 ### 推荐模板
 
@@ -193,7 +193,9 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 
 **输出**：拼合完成的整图。
 
-可以使用另一个扩展中的 [Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 替代，Smart merge images 对色彩和畸变校正的处理结果更好。Smart merge images 支持局部图像拼接，可用下方工作流修复局部画面。
+可以使用另一个扩展中的 [Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 替代，Smart merge images 对色彩和畸变校正的处理结果更好。  
+Smart merge images 支持局部图像拼接，可用下方工作流修复局部画面;   
+注意：提示词中描述了具体的物体元素，但它遵从了在所有分块中都成立的核心原则。  
 
 <img width="2451" height="893" alt="image" src="https://github.com/user-attachments/assets/d5cab444-de86-4afb-92d4-0af5199408a8" />
 
