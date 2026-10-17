@@ -189,7 +189,7 @@ class TiledUpscale:
 
     
     def refine(self, model, vae, image, upscale_by, tile_size, overlap, feather, seed, steps, cfg, sampler_name, scheduler, denoise, 
-               reference_mode=False, redo_first_tile=True, grounding_px=768, clip=None, prompt="enhance quality preserving all the details", 
+               reference_mode=False, redo_first_tile=False, grounding_px=768, clip=None, prompt="enhance quality preserving all the details", 
                negative_prompt="", reference_strength="1.0,1.0,0.95,0.9,0.8", tile_mode=True, columns=2, rows=2):
         if clip is None:
             raise ValueError(

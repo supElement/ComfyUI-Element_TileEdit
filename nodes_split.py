@@ -82,7 +82,7 @@ class ElementTileSplit:
         }
 
     
-    def split(self, model, image, vae, upscale_by, tile_size, overlap, reference_mode, grounding_px, clip=None, 
+    def split(self, model, image, vae, upscale_by, tile_size, overlap, reference_mode=False, grounding_px=768, clip=None, 
               prompt="enhance quality preserving all the details", negative_prompt="", tile_mode=True, columns=2, rows=2):
         if clip is None:
             raise ValueError(
