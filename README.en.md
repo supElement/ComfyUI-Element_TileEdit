@@ -133,7 +133,10 @@ Dependencies are the ComfyUI itself, with no additional installation items.
 |---|---|
 | **model / vae / image / clip** | The four basic components. clip is mandatory: it encodes per-tile conditioning, positive/negative input ports have been removed |
 | **upscale_by** | Magnification factor, 1.0 = only resampling refinement without magnification |
-| **tile_size** | Resampling resolution per tile. 0 = automatic (approximately 4 tiles along the longer edge, 1024–1536). Larger tiles result in fewer total tiles and longer processing time per tile. For identity-edit LoRA, each tile should be ≤ 2MP |
+| **tile_mode** | Tiling method: enabled for "by count," disabled for "by size." |
+| **columns** | Visible only when `tile_mode` is set to "by count." Specifies the number of divisions along the width. |
+| **rows** | Visible only when `tile_mode` is set to "by count." Specifies the number of divisions along the height. |
+| **tile_size** | Visible only when `tile_mode` is set to "by size." Defines the resampling resolution for each tile. 0 = automatic (approximately 4 tiles along the longer side, ranging from 1024–1536 pixels). Larger tiles result in fewer total tiles but increase the processing time per tile. For "identity-edit" LoRA, please ensure each tile is ≤ 2MP. |
 | **overlap** | Overlap amount between adjacent slices. 0 = automatic: 15% of slice size, capped at 256px (the smaller of the two). Any non-zero value will be used as-is, without a cap. Higher values result in smoother seams but increase computational overhead (overhead grows quadratically with overlap) |
 | **feather** | Feathering strength for inter-tile blending, 1.0 = maximum smoothness, generally unchanged |
 | **steps / cfg / sampler / scheduler / denoise / seed** | Same as KSampler, directly use the official recommended values for this model |
@@ -168,7 +171,10 @@ Only performs magnification + tiling + per-tile encoding, sampling is handled by
 |---|---|
 | **model / image / vae / clip** | clip is mandatory, positive/negative input ports have been removed, per-tile conditioning is encoded by clip + prompt / negative_prompt |
 | **upscale_by** | Same as above |
-| **tile_size / overlap** | Same as above (tooltip contains ≤2MP warning) |
+| **tile_mode** | Tiling method: enabled for "by count," disabled for "by size." |
+| **columns** | Visible only when `tile_mode` is set to "by count." Specifies the number of divisions along the width. |
+| **rows** | Visible only when `tile_mode` is set to "by count." Specifies the number of divisions along the height. |
+| **tile_size** | Visible only when `tile_mode` is set to "by size." Defines the resampling resolution for each tile. 0 = automatic (approximately 4 tiles along the longer side, ranging from 1024–1536 pixels). Larger tiles result in fewer total tiles but increase the processing time per tile. For "identity-edit" LoRA, please ensure each tile is ≤ 2MP. |
 | **reference_mode** | On = Krea 2 identity-edit: per-tile output vision slot grounding + reference latent dual-channel conditioning, reference is attached to both positive and negative sides; **must be paired with a Patch node** (Split does not reconstruct forward). Off = General conditioning path |
 | **grounding_px / prompt / negative_prompt** | Same meaning as the integrated node. Split does not have a reference_strength parameter: step-by-step strength scheduling should use the **Element Strength Schedule** node attached to the model (its output connects to the model input of KSampler) |
 
