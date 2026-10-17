@@ -77,11 +77,11 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 | 模型 | 推荐降噪值 | 参考注入方式 | 一致性 | 说明 |
 |---|---|---|---|---|
 | **Qwen-Image 2.1** | **1.0** | 参考 latent 精确插在 vision token 位置（image_slots），tile 保持原尺寸不 resize | ★★★★★ | 参考信号最原生，多数情况下可直接拉满。细节完全由模型生成，同时身份 / 结构保持一致 |
-| **Qwen-Image Edit 2509** | **1.0** | 384×384 vision bucket + reference latent 双通道 | ★★★★☆ | 与 2511 同源，参考通道成熟，可放心拉满 |
-| **Qwen-Image Edit 2511** | **1.0** | 384×384 vision bucket + reference latent 双通道 | ★★★★☆ | 同 2509，推荐直接用 1.0 |
-| **Krea2 + krea2_identity_edit** | **0.7 – 0.8** | 手动重建 `[text｜source(frame=1)｜target(frame=0)]` in-context 前向 | ★★★★ | 高降噪下一致性最好，但有时会出现脏点 **不建议拉满**；0.7–0.8 是清晰度与稳定的最佳平衡点 |
-| **FLUX.2 klein** | **0.7 – 0.8** | 仅 reference-latent 通道（text encoder 为纯文本，无 vision grounding） | ★★★ | 缺少 vision 通道，参考信号弱一档，容易脏、偏色, 可使用[Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 做色彩或变形校正，搭配防偏移类lora使用时可提升至★★★★ |
-| **FLUX.3 klein** | **0.7 – 0.8** | text encoder 仅文本有效，无 vision grounding | ★★☆ | 模型本身弱（也可能是comfyUI实现的问题），偏色 |
+| **Qwen-Image Edit 2511** | **1.0** | 384×384 vision bucket + reference latent 双通道 | ★★★★ | 同 2509，推荐直接用 1.0 |
+| **Qwen-Image Edit 2509** | **1.0** | 384×384 vision bucket + reference latent 双通道 | ★★★★ | 与 2511 同源，参考通道成熟，可拉满 |
+| **Krea2 + krea2_identity_edit** | **0.7 – 0.8** | 手动重建 `[text｜source(frame=1)｜target(frame=0)]` in-context 前向 | ★★★☆ | 高降噪下色彩一致性最好，但有时会出现脏点，0.7–0.8 是清晰度与稳定的最佳平衡点 |
+| **FLUX.2 klein** | **0.7 – 0.8** | 仅 reference-latent 通道（text encoder 为纯文本，无 vision grounding） | ★★★ | 缺少 vision 通道，参考信号弱一档，很容易脏、偏色, 可使用[Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 做色彩或变形校正，搭配防偏移类lora使用时可提升至★★★☆ |
+| **FLUX.3 klein** | **0.7 – 0.8** | text encoder 仅文本有效，无 vision grounding | ★★★ | 缺少细节、易变形（也可能是comfyUI实现的问题），优点是不容易脏 |
 | **Qwen-Image-2512/SDXL系列** | **0.2 – 0.5** | 无 | ★ | 非编辑模型无一致性锚定，即使接入ipadapter等方法，效果依然有限 |
 
 以上测试数量有限，存在片面和主观因素，还是要根据不同情况来调整参数。
