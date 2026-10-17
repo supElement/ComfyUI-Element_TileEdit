@@ -173,6 +173,7 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 | 参数 | 说明 |
 |---|---|
 | **model / image / vae / clip** | clip 必接，positive / negative 输入端口已移除，逐块 conditioning 由 clip + prompt / negative_prompt 编码 |
+| **upscale_by** | 放大倍率，1.0 = 只做重采样精修不放大 |
 | **tile_mode** | 分块方法：开 by count，关 by size |
 | **columons** | tile_mode 开时（by count）才显示这个参数。宽度平分数量 |
 | **rows** | tile_mode 开时（by count）才显示这个参数。高度平分数量 |
