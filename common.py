@@ -865,5 +865,11 @@ def _relaxed_reference_pixels(pixels, strength, keep_size=False):
     out = flat.reshape(b, c, h, w).clamp(0.0, 1.0).to(pixels.dtype)
     return out.permute(0, 2, 3, 1)
 
+def _sanitize_latent(samples):
+    """NaN/Inf 单元在任何内容下都非法，会被 VAE 解码成实心色块。
+    仅替换非有限值，其余数据零触碰——对所有模型、所有图像构造上安全。"""
+    if torch.is_floating_point(samples) and not torch.isfinite(samples).all():
+        return torch.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0)
+    return samples
 
 

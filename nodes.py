@@ -35,6 +35,7 @@ from .common import (
     _detail_weight,
     _split_frequencies,
     _match_channels,
+    _sanitize_latent,
 )
 
 
@@ -112,7 +113,7 @@ class TiledUpscale:
                     "tooltip": "Vision-slot size for the per-tile text encode. Qwen Edit 2509/2511: area "
                                "bucket, 0 or >=384 = official 384x384 resize. Qwen Image 2.1: ignored. "
                                "Krea 2: caps the vision input's longest side, 0 = tile size."}),
-                "reference_strength": ("STRING", {"default": "1.0,1.0,1.0,0.8,0.5", "multiline": False, "tooltip":
+                "reference_strength": ("STRING", {"default": "1.0,1.0,0.95,0.9,0.8", "multiline": False, "tooltip":
                     "A list of reference strengths for each step, corresponding strictly to the number of steps."
                     "Supports delimiters such as commas (Chinese or English), enumeration commas (、), and colons. A single value applies to all steps; "
                     "if fewer values ​​are provided than the number of steps, the last value is repeated; if more are provided, only the initial portion is used."}),
@@ -172,6 +173,7 @@ class TiledUpscale:
                                       positive_tile, negative_tile, latent, denoise=denoise,
                                       disable_pbar=disable_pbar, seed=seed,
                                       callback=_tile_sampling_callback(previewer, steps, state))
+        samples = _sanitize_latent(samples)
         decoded = vae.decode(samples)
         if len(decoded.shape) == 5:
             decoded = decoded.reshape(-1, decoded.shape[-3], decoded.shape[-2], decoded.shape[-1])
@@ -179,7 +181,7 @@ class TiledUpscale:
 
 
     
-    def refine(self, model, vae, image, upscale_by, tile_size, overlap, feather, seed, steps, cfg, sampler_name, scheduler, denoise, reference_mode=False, redo_first_tile=True, grounding_px=768, clip=None, prompt="enhance quality preserving all the details", negative_prompt="", reference_strength="1.0,1.0,1.0,0.8,0.5"):
+    def refine(self, model, vae, image, upscale_by, tile_size, overlap, feather, seed, steps, cfg, sampler_name, scheduler, denoise, reference_mode=False, redo_first_tile=True, grounding_px=768, clip=None, prompt="enhance quality preserving all the details", negative_prompt="", reference_strength="1.0,1.0,0.95,0.9,0.8"):
         if clip is None:
             raise ValueError(
                 "TiledUpscale: 'clip' is not connected. The positive/negative input ports have been removed."
@@ -328,13 +330,15 @@ class TiledUpscale:
             blended = context[region] / done.clamp(min=1e-8)
             alpha = (done / _CONTEXT_EDGE).clamp(0.0, 1.0)
             tile_input = blended * alpha + source_crop * (1.0 - alpha)
+            
+            noise_seed = (seed + info["tile_id"] * 0x9E3779B97F4A7C15) % (1 << 64)
             generated = self._sample_tile(
                 model, sampling_model,
                 tile_positive[info["tile_id"]] if tile_positive else positive,
                 tile_negative[info["tile_id"]] if tile_negative else negative,
-                vae, tile_input, seed, steps, cfg, sampler_name, scheduler, denoise,
-                reference_method, source_holder, previewer, state, disable_pbar,
-                attach_reference)                                   
+                vae, tile_input, noise_seed, steps, cfg, sampler_name, scheduler, denoise,
+                reference_method, source_holder, previewer, state, disable_pbar, attach_reference)
+
             if generated.shape[1] != h or generated.shape[2] != w:
                 generated = F.interpolate(generated.permute(0, 3, 1, 2), size=(h, w),
                                           mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
