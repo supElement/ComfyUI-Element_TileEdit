@@ -94,25 +94,28 @@ Element_TileEdit 把"重绘"和"保特征"拆成两条独立通道，把原图�
   以上测试数量有限，存在片面和主观因素，还是要根据不同情况来调整参数。当然，你也可以通过使用增强lora，或使用微调模型来改善结果，但这不在测试范围内。  
 ---
 
-## 全局提示词（重要）
+## 全局提示词（非 by manual 模式）
 
-本节点会把同一份提示词用于每一个分块的文本编码，而每个分块只包含整张图的一小片区域。区域里有什么内容，是由参考图（像素特征）决定的；提示词只负责告诉模型“怎么处理”这些内容。 因此，提示词应遵从“对所有分块都成立”的核心原则：
+在非手动分块模式下（如一体化节点、by count、by size），本节点会将同一份全局提示词应用于每一个分块的文本编码。由于每个分块仅涵盖原图的一小片局部区域，该区域的具体内容完全由参考图（像素特征）决定，而提示词仅负责指导模型“如何处理”这些内容。
+
+因此，全局提示词必须遵循“对所有分块均普遍适用”的核心原则：
 
 ### ✅ 应该写
+1. 操作指令 —— 告诉模型这次采样的核心任务（对每个分块都成立）：
+  - sharpen and refine details, preserve identity and structure, clean upscale  
+  - （锐化并精修细节，保持身份与结构，干净地放大）
 
-**1. 操作指令** —— 告诉模型这次采样要做什么（对每个分块都成立）：
-- `sharpen and refine details, preserve identity and structure, clean upscale`
-
-**2. 全局风格 / 光照 / 色调** —— 整张图共有的氛围（对每个分块也都成立）：
-- `cool blue ambient lighting, warm orange rim light, cinematic tone, photorealistic`
+2. 全局风格 / 光照 / 色调 —— 整张图共有的氛围（对每个分块也都成立）：
+  - cool blue ambient lighting, warm orange rim light, cinematic tone, photorealistic  
+  - （冷蓝色环境光，暖橙色轮廓光，电影级色调，照片级写实）
 
 ### ❌ 不应该写
+  - 具体的物体、人物或场景名词（如 woman at a computer, glasses, monitor, coffee cup）。
+  - 除非你能确定该提示词描述的物体元素，对画面中的每一个分块都成立。
 
-**具体物体、人物、场景名词**（如 `woman at a computer, glasses, monitor, coffee cup`），除非你能确定提示词中描述的物体元素对所有分块都成立：
-
-### 推荐模板
-
-- `sharpen and refine, preserve identity and structure, {全局色调/光照/风格}, {画质词}`
+### 💡 推荐模板
+  - sharpen and refine, preserve identity and structure, {全局色调/光照/风格}, {画质词}
+---
 
 ## 📦 安装
 
