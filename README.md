@@ -5,7 +5,8 @@
 
 </div>
 
-# ComfyUI-Element_TileUpscale
+# ComfyUI-Element_TileEdit
+  <sub> 原名：ComfyUI-Element_TileUpscale </sub>
 
 一个专为图像编辑模型设计的分块精修 / 编辑 / 放大节点。它让 Qwen-Image 2.1 / Edit 2509 / 2511、FLUX.3/FLUX.2 klein、Krea2 这类模型在分块放大时，以 分块参考 ≫ 频率分离融合 > 邻居上下文 三层机制共同保证跨块一致性，denoise 重绘强度可以放心开到 0.7–1.0，同时保持原图的身份、结构与纹理一致；每采样步参考强度可以自定义，控制修复强度与一致性的平衡；延续部分图像编辑模型的能力（仅限单图）。这是传统 img2img 分块放大做不到的。用空间分块替代 Mask，实现多区域、多指令的图像编辑。手动分割模式（by Manual） 提供了真正的“分块级语义隔离”与像素级控制力：你可以精准地把分块指定到“白衬衫”上，并且只在对应 Layer 的 Prompt 里写“改成蓝衬衫”。同时，未被框选的背景、头发、桌子会被自动划入 Gap fill（补块） 区域，它们不接收改衬衫的指令（或仅接收基础的全局画质增强指令），从而完美保持原状。此外，每个手动分割的图层还可以独立设置放大尺寸，让你在编辑或重绘核心区域时，拥有更高的分辨率与细节表现。手动分割（CTRL + 左键拖动添加分块）。
 
@@ -117,11 +118,11 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 
 ### 方式一：手动安装（Manual Installation）
       cd ./ComfyUI/custom_nodes
-      git clone https://github.com/supElement/ComfyUI-Element_TileUpscale.git
+      git clone https://github.com/supElement/ComfyUI-Element_TileEdit.git
 
 ### 方式二：通过 Manager 安装（Install using Manager）
 
-在 ComfyUI Manager 中搜索 `ComfyUI-Element_TileUpscale`，点击 Install。
+在 ComfyUI Manager 中搜索 `ComfyUI-Element_TileEdit`，点击 Install。
 
 依赖即 ComfyUI 本体，无额外安装项。
 
@@ -133,16 +134,22 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 
 ## 常见问题
 
-**怎么用？**
-workflow文件夹中已提供相关工作流。  
+**怎么用？**  
+- workflow文件夹中已提供相关工作流。  
 
-**显存不够？**
-减小 tile_size（分块更多、单块更小）。Edit 2509/2511 可额外降低 grounding_px；Qwen 2.1 的 grounding_px 不参与计算，只能减小 tile_size。
+**怎么手动分割？**
 
-**SDXL 等普通模型能用吗？**
-能。节点会自动退化为普通分块 img2img，参考 latent 被模型忽略，用 denoise 控制细节强度（0.2 – 0.5 起试）。
+- 必须使用 Element Tile Split 节点中的 by manual 模式，在画布上按住 CTRL键 + 鼠标左键，拖动添加分块，可连续添加。
+- 每添加一个分块，右侧面板会增加相对应的图层，每个图层可在下方的图层提示词中单独设置提示词。
+- 可以选择不需要的分块按 delete 删除分块（图层），也可以用鼠标点击对应图层上的删除按钮来删除分块。
 
-**Krea 2 用单节点时要不要接 Patch 节点？**
-`reference_mode` 开着就不需要（内部自建同款机制，接了也会被自动忽略）；关着（conditioning 路径）**必须接**，否则参考被 core 静默丢弃。详见上文 Patch 节点说明。
+**显存不够？**  
+- 减小 tile_size（分块更多、单块更小）。Edit 2509/2511 可额外降低 grounding_px；Qwen 2.1 的 grounding_px 不参与计算，只能减小 tile_size。
+
+**SDXL 等普通模型能用吗？**  
+- 能。节点会自动退化为普通分块 img2img，参考 latent 被模型忽略，用 denoise 控制细节强度（0.2 – 0.5 起试）。
+
+**Krea 2 用单节点时要不要接 Patch 节点？**  
+- `reference_mode` 开着就不需要（内部自建同款机制，接了也会被自动忽略）；关着（conditioning 路径）**必须接**，否则参考被 core 静默丢弃。详见上文 Patch 节点说明。
 
 
