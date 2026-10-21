@@ -1,4 +1,4 @@
-# Element Tile Upscale 参数手册
+# Element_TileEdit 参数手册
 
 ---
 
