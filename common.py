@@ -230,17 +230,17 @@ def _probe_pose_branch_cache(cls):
     """对已安装核心的 PoseBranchCache.select 做真实行为探测。
     返回 True=仍有 bug / False=已修复 / None=探针无法进行（结构变了）。
     生产场景里 K_noref 槽排在 K_ref 槽后面时 list.remove 崩，探针原样复现。"""
-    c = object.__new__(cls)            # 绕过 __init__，手工布置最小状态
-    c._pending = {}                    # select 开头会检查它
+    c = object.__new__(cls)            
+    c._pending = {}                    
     c.slot = None
-    c.slots = [{"key": torch.zeros(1, 8)},   # 前槽：形状不同（等价 K_ref 槽）
-               {"key": torch.zeros(1, 4)}]   # 目标槽（等价 K_noref 槽）
+    c.slots = [{"key": torch.zeros(1, 8)},   
+               {"key": torch.zeros(1, 4)}]   
     try:
         hit = cls.select(c, torch.zeros(1, 4), create=False)
     except RuntimeError:
-        return True                     # 跨形状比较崩溃 = 未修复
+        return True                     
     except Exception:
-        return None                     # 探针失效，交回退逻辑
+        return None                     
     return bool(hit) and c.slot is c.slots[-1]
 
 def _noref_cache_bypass_needed():
@@ -248,7 +248,7 @@ def _noref_cache_bypass_needed():
     global _NOREF_CACHE_BYPASS
     if _NOREF_CACHE_BYPASS is not None:
         return _NOREF_CACHE_BYPASS
-    result = True   # 判定不了时按"有问题"处理：bypass 只是少复用，不会错
+    result = True   
     try:
         import comfy.ldm.wan.model_animate2 as _m2
         cls = getattr(_m2, "PoseBranchCache", None)
@@ -257,7 +257,6 @@ def _noref_cache_bypass_needed():
             if probe is not None:
                 result = probe
             else:
-                # 回退：源码扫描。修复版不会保留这行。
                 result = "self.slots.remove(" in inspect.getsource(cls.select)
     except Exception:
         pass
@@ -301,8 +300,6 @@ def _drop_refs_no_cache(executor, args, kwargs):
         opts["qwen_image21_cache"] = {"device": "off"}
         args = args[:slot] + (opts,) + args[slot + 1:]
     return args, kwargs
-
-
 
 def _scheduled_ref_model(model, strength_schedule):
     """reference-latent 路径（Qwen Image 2.1 / Edit 2509/2511 / FLUX.2 等）的每步
@@ -734,19 +731,6 @@ def _axis_fades(positions):
         fades.append((max(0, start), max(0, end)))
     return fades
 
-
-# def _axis_ramp(size, fade_start, fade_end, device, dtype):
-    # """1-D weight ramp: 1.0 in the tile's core, fading to 0 across each overlapping edge."""
-    # ramp = torch.ones(size, device=device, dtype=dtype)
-    # if fade_start + fade_end > size:
-        # scale = size / (fade_start + fade_end)
-        # fade_start = int(fade_start * scale)
-        # fade_end = int(fade_end * scale)
-    # if fade_start > 0:
-        # ramp[:fade_start] *= torch.linspace(0.0, 1.0, fade_start, device=device, dtype=dtype)
-    # if fade_end > 0:
-        # ramp[-fade_end:] *= torch.linspace(1.0, 0.0, fade_end, device=device, dtype=dtype)
-    # return ramp
 
 def _axis_ramp(size, fade_start, fade_end, device, dtype):
     """1-D weight ramp: 1.0 in the tile's core, fading to 0 across each overlapping edge.

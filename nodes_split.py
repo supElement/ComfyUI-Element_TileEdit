@@ -148,12 +148,11 @@ def _compute_manual_fades(tiles, default_ov, out_w, out_h):
         t.setdefault("fade_left", 0)
         t.setdefault("fade_right", 0)
 
-    # 1. 处理背景块之间的羽化
     for i in range(n):
         for j in range(i + 1, n):
             t, other = tiles[i], tiles[j]
             
-            # 如果其中一个是手绘框，直接跳过，因为我们后面会强制固定它
+            # 如果其中一个是手绘框，直接跳过，后面会强制固定它
             if t.get("kind") == "layer" or other.get("kind") == "layer":
                 continue
                 
@@ -186,10 +185,8 @@ def _compute_manual_fades(tiles, default_ov, out_w, out_h):
     # 2. 强制手绘框的羽化四边绝对相等，并且等于外扩量
     for t in tiles:
         if t.get("kind") == "layer":
-            # 限制单边 fade 不超过宽高的 45%，防止框太小导致中心没有实心
             fw = min(half, t["width"] * 0.45)
             fh = min(half, t["height"] * 0.45)
-            # 只有在画布内部的边才赋予羽化，贴着画布边缘的边不需要羽化
             t["fade_top"] = fh if t["y"] > 0 else 0
             t["fade_bottom"] = fh if t["y"] + t["height"] < out_h else 0
             t["fade_left"] = fw if t["x"] > 0 else 0
@@ -248,8 +245,8 @@ def _find_largest_free_rect(free):
     """free[r][c]=True 为空闲。逐行直方图法求最大全空闲矩形。"""
     rows, cols = len(free), len(free[0])
     heights = [0] * cols
-    balanced = None   # (area, r0, c0, h, w) 纵横比合格的最大矩形
-    widest   = None   # (area, r0, c0, h, w) 兜底：面积最大（可能窄）
+    balanced = None   
+    widest   = None   
     for r in range(rows):
         for c in range(cols):
             heights[c] = heights[c] + 1 if free[r][c] else 0
@@ -364,22 +361,17 @@ def _edge_fully_covered(B, R):
     """判断矩形 R 是否完整跨越了矩形 B 的某一条边。"""
     bx, by, bw, bh = B
     rx, ry, rw, rh = R
-    # 必须有交集
     ix1, iy1 = max(bx, rx), max(by, ry)
     ix2, iy2 = min(bx + bw, rx + rw), min(by + bh, ry + rh)
     if ix1 >= ix2 or iy1 >= iy2:
         return False
     
-    # 上边被完全覆盖
     if rx <= bx and rx + rw >= bx + bw and ry <= by and ry + rh > by:
         return True
-    # 下边被完全覆盖
     if rx <= bx and rx + rw >= bx + bw and ry < by + bh and ry + rh >= by + bh:
         return True
-    # 左边被完全覆盖
     if ry <= by and ry + rh >= by + bh and rx <= bx and rx + rw > bx:
         return True
-    # 右边被完全覆盖
     if ry <= by and ry + rh >= by + bh and rx < bx + bw and rx + rw >= bx + bw:
         return True
     return False
@@ -390,10 +382,8 @@ def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
     if regions is None:
         regions = []
         
-    # 1. 先不考虑手绘框，即先均分
     base_grid = _balanced_subsplit([(0, 0, out_w, out_h)], gap_max_px)
     
-    # 2. 考虑手绘框，只有边被完全覆盖才切割（否则保留整块，允许盖住框）
     pieces = []
     for b in base_grid:
         parts = [b]
@@ -404,12 +394,11 @@ def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
                 if _edge_fully_covered(p, rr):
                     nxt.extend(_rect_subtract(p, rr))
                 else:
-                    nxt.append(p) # 没有完全覆盖边，直接保留整块
+                    nxt.append(p) 
             parts = nxt
             if not parts: break
         pieces.extend(parts)
         
-    # 3. 若切割后出现比例大于5：1的长条合并到邻居分块（向四周扩展吃框，遇到邻居就合并）
     changed = True
     while changed:
         changed = False
@@ -440,7 +429,6 @@ def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
                 x = max(0, int(x - expand_l))
                 w = min(out_w - x, int(w + diff))
                 
-            # 扩展后的矩形，如果与其他块重叠，就合并到邻居分块（取外接矩形）
             nx, ny, nw, nh = x, y, w, h
             for j in range(len(pieces)):
                 if i == j or pieces[j] is None: continue
@@ -462,7 +450,7 @@ def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
         if changed:
             pieces = [p for p in pieces if p is not None]
             
-    # 4. 若合并后超过max side参数，则对这个分块做平分
+    # 若合并后超过max side参数，则对这个分块做平分
     final_pieces = []
     for p in pieces:
         if p[2] > gap_max_px or p[3] > gap_max_px:
@@ -470,7 +458,6 @@ def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
         else:
             final_pieces.append(p)
             
-    # 清理因扩展合并可能产生的微调重叠
     clean_pieces = []
     for p in final_pieces:
         parts = [p]
@@ -538,7 +525,7 @@ def _save_preview(image, unique_id):
     """
     try:
         _, h, w, _ = image.shape
-        src_meta = {"w": int(w), "h": int(h)}   # ← 新增：源图真实尺寸（注意此时 image 还没被缩小）
+        src_meta = {"w": int(w), "h": int(h)}   
         scale = min(1.0, PREVIEW_MAX_EDGE / max(h, w))
         if scale < 1.0:
             nh, nw = max(1, round(h * scale)), max(1, round(w * scale))
@@ -552,7 +539,7 @@ def _save_preview(image, unique_id):
             os.makedirs(temp_dir, exist_ok=True)
             name = f"tilesplit_preview_{int(time.time() * 1000)}_{random.randint(1, 1000000)}.png"
             pil.save(os.path.join(temp_dir, name), format="PNG")
-            bg = [{"filename": name, "subfolder": "", "type": "temp", **src_meta}]   # ← 改：追加 **src_meta
+            bg = [{"filename": name, "subfolder": "", "type": "temp", **src_meta}]   
         except Exception as e:
             logging.warning("[TileSplit] preview temp failed: %s", e)
         try:
@@ -561,7 +548,7 @@ def _save_preview(image, unique_id):
             os.makedirs(out_dir, exist_ok=True)
             name = f"ets_preview_{unique_id}.jpg"
             pil.save(os.path.join(out_dir, name), format="JPEG", quality=92)
-            ref = {"filename": name, "subfolder": sub, "type": "input", **src_meta}  # ← 改：追加 **src_meta
+            ref = {"filename": name, "subfolder": sub, "type": "input", **src_meta}  
         except Exception as e:
             logging.warning("[TileSplit] preview persist failed: %s", e)
         return bg, ref
@@ -624,7 +611,6 @@ class ElementTileSplit:
         source = _load_source_image(data, image)
         _, src_h, src_w, channels = source.shape
 
-        # 输出画布 = 源 × unified，ceil 对齐 div（只放大不裁切）
         out_w = _snap_ceil(src_w * u_up, div)
         out_h = _snap_ceil(src_h * u_up, div)
 
@@ -659,7 +645,6 @@ class ElementTileSplit:
         covered = None
 
         if manual_mode:
-            # 手画框 → 输出空间 region（div 吸附；贴边的框延伸到画布边缘）
             layer_regions = []
             for l in layers:
                 rx = _clamp(_snap(l["x"] * u_up, div), 0, out_w - div)
@@ -674,7 +659,6 @@ class ElementTileSplit:
                     rh = _clamp(_snap(l["h"] * u_up, div), div, out_h - ry)
                 layer_regions.append((l, {"x": rx, "y": ry, "w": rw, "h": rh}))
 
-            # covered 网格：有 fill_gaps 就分配（无框时 = 整幅画布都视为未覆盖）
             if fill_gaps:
                 cols_n, rows_n = out_w // div, out_h // div
                 covered = [[False] * cols_n for _ in range(rows_n)]
@@ -706,24 +690,20 @@ class ElementTileSplit:
                 emit([{"x": 0, "y": 0, "w": out_w, "h": out_h,
                        "col": 0, "row": 0, "kind": "fallback"}])
 
-            # 完全尊重 UI 传过来的 Overlap 设置，不再进行不合理的钳制
             if ov_mode == "px":
                 default_ov = max(0, int(ov_px or 0))
             else:
-                # 对于百分比模式，基于整个画布的短边计算像素
                 default_ov = int(round(min(out_w, out_h) * (_clamp(float(ov_pct), 0.0, 45.0) / 100.0)))
 
             if fill_gaps and covered is not None:
-                # 提取纯坐标列表传进去
                 rg_list = [rg for _, rg in layer_regions]
-                # 传入 overlap_px=0，因为我们在最后会对所有 tiles 统一外扩
+                # 传入 overlap_px=0，最后会对所有 tiles 统一外扩
                 for i, (gx, gy, gw, gh) in enumerate(
                         _plan_gap_tiles(covered, div, out_w, out_h, gap_max,
                                         overlap_px=0, regions=rg_list)):
                     emit([{"x": gx, "y": gy, "w": gw, "h": gh,
                            "col": i, "row": 0, "kind": "gap"}])
         else:
-            # 统一模式：by count 用 columns×rows；by size 按 tile_size（输出 px）摊
             if mode == "size":
                 cols = max(1, -(-out_w // u_tile))
                 rows = max(1, -(-out_h // u_tile))
@@ -749,12 +729,8 @@ class ElementTileSplit:
 
         # ---- manual 模式收尾：为所有 tile 计算 fade 值 + 网格 overlap ----
         if manual_mode:
-            # default_ov = ov_values[0] if ov_values else min(64, div * 4)
-            # 层与层 / 层与间隙 / 间隙与间隙 之间注入 overlap（仅对无 overlap 的边生效）
             _inject_manual_overlap(tiles, default_ov, out_w, out_h)  # 加上 out_w 和 out_h
-            # 根据 tile 之间的真实 overlap，计算每个 tile 的 fade_top/bottom/left/right
             _compute_manual_fades(tiles, default_ov, out_w, out_h)
-            # 网格 overlap = 所有 tile 间实际存在的最大 overlap
             grid_overlap = max(
                 (max(t.get("fade_top", 0), t.get("fade_bottom", 0),
                      t.get("fade_left", 0), t.get("fade_right", 0))
@@ -765,11 +741,9 @@ class ElementTileSplit:
         else:
             grid_overlap = max(ov_values) if ov_values else 0
 
-        # 每 tile：源空间 crop（= region / unified）→ 重采样到 gen（= 源区域 × 该层 upscale）
         pbar = comfy.utils.ProgressBar(len(tiles))
         tile_images, grid_tiles = [], []
         for idx, t in enumerate(tiles):
-            # 增加防御：确保坐标和尺寸不会超出画布边界
             tx = max(0, min(t["x"], out_w - 1))
             ty = max(0, min(t["y"], out_h - 1))
             tw = min(t["width"], out_w - tx)
@@ -805,7 +779,7 @@ class ElementTileSplit:
 
         grid = {
             "tiles": grid_tiles,
-            "num_x": 0, "num_y": 0,          # 非均匀网格，无全局列/行
+            "num_x": 0, "num_y": 0,          
             "img_h": out_h, "img_w": out_w,
             "work_h": out_h, "work_w": out_w,
             "overlap": grid_overlap,

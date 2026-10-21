@@ -15,7 +15,14 @@ def _color_match(generated, reference, strength=1.0, weight=None):
     
     g = generated.float()
     r = reference.float()
-    
+
+    # --- 防止传进来的参考图尺寸不同 ---
+    if g.shape[1:3] != r.shape[1:3]:
+        r = F.interpolate(r.permute(0, 3, 1, 2), size=(g.shape[1], g.shape[2]), mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
+    if weight is not None and (weight.shape[1] != g.shape[1] or weight.shape[2] != g.shape[2]):
+        weight = F.interpolate(weight.permute(0, 3, 1, 2), size=(g.shape[1], g.shape[2]), mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
+    # ------------------------------
+
     if weight is None:
         mask_3d = torch.ones_like(g)
     else:
@@ -32,8 +39,8 @@ def _color_match(generated, reference, strength=1.0, weight=None):
     g_var = ((g - g_mean)**2 * mask_3d).sum(dim=(1, 2), keepdim=True) / sum_mask
     r_var = ((r - r_mean)**2 * mask_3d).sum(dim=(1, 2), keepdim=True) / sum_mask
     
-    g_std = g_var.sqrt().clamp_min(1e-6)
-    r_std = r_var.sqrt().clamp_min(1e-6)
+    g_std = g_var.sqrt().clamp_min(0.05)
+    r_std = r_var.sqrt().clamp_min(0.05)
     
     matched = (g - g_mean) / g_std * r_std + r_mean
 
@@ -70,7 +77,6 @@ class ElementTileMerge:
         channels = grid["channels"]
         overlap = grid["overlap"]
 
-        # 1. 准备原图
         base_canvas = None
         if original_image is not None:
             src = _unwrap(original_image)
@@ -92,7 +98,6 @@ class ElementTileMerge:
         if base_canvas is not None:
             base_canvas = base_canvas.to(device=device, dtype=dtype)
 
-        # 2. 准备累加器 (仅保留低频)
         bg_canvas = torch.zeros(1, work_h, work_w, channels, device=device, dtype=dtype)
         bg_weight = torch.zeros(1, work_h, work_w, 1, device=device, dtype=dtype)
 
@@ -108,7 +113,6 @@ class ElementTileMerge:
                 src = tile_sources[i]
             triples.append((info, decoded, src))
 
-        # 3. 直接累加图层像素 (纯 Alpha 加权混合)
         for info, decoded, src in triples:
             if decoded.ndim == 3: decoded = decoded.unsqueeze(0)
             decoded = decoded[:1].to(device=device, dtype=dtype)
@@ -117,21 +121,24 @@ class ElementTileMerge:
             x, y, w, h = info["x"], info["y"], info["width"], info["height"]
 
             region = (slice(None), slice(y, y + h), slice(x, x + w), slice(None))
-            weight = _tile_weight(info, feather, device, dtype) # 提前计算权重图
+            weight = _tile_weight(info, feather, device, dtype) 
+
+            # --- 在色彩匹配之前，先将生成的高清图缩小到画布网格尺寸 ---
+            if decoded.shape[1] != h or decoded.shape[2] != w:
+                decoded = F.interpolate(decoded.permute(0, 3, 1, 2), size=(h, w), mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
 
             if cm_strength > 0.0 and src is not None:
                 if src.ndim == 3: src = src.unsqueeze(0)
                 src = src[:1].to(device=device, dtype=dtype)
-                # 传入 weight 进行边缘匹配
+                
+                # --- 确保参考图 src (来自 tile_sources) 也缩放到相同尺寸 ---
+                if src.shape[1] != h or src.shape[2] != w:
+                    src = F.interpolate(src.permute(0, 3, 1, 2), size=(h, w), mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
+                
                 decoded = _color_match(decoded, src, cm_strength, weight)
 
-            if decoded.shape[1] != h or decoded.shape[2] != w:
-                decoded = F.interpolate(decoded.permute(0, 3, 1, 2), size=(h, w), mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
-
-            # region = (slice(None), slice(y, y + h), slice(x, x + w), slice(None))
-            # weight = _tile_weight(info, feather, device, dtype)
             is_fg = info.get("kind") not in {"gap", "fallback", "unified"}
-
+            
             if is_fg:
                 fg_canvas[region] += decoded * weight
                 fg_weight[region] += weight
@@ -139,30 +146,18 @@ class ElementTileMerge:
                 bg_canvas[region] += decoded * weight
                 bg_weight[region] += weight
 
-        # 4. 还原为完整的图层图像
         bg_img = bg_canvas / bg_weight.clamp(min=1e-8)
         bg_alpha = bg_weight.clamp(0.0, 1.0)
         
         fg_img = fg_canvas / fg_weight.clamp(min=1e-8)
         fg_alpha = fg_weight.clamp(0.0, 1.0)
 
-        # # 5. 图层叠加合成 (Normal 模式)
-        # # 底层：原图打底，叠加背景
-        # if base_canvas is not None:
-            # base_merged = bg_img * bg_alpha + base_canvas * (1.0 - bg_alpha)
-        # else:
-            # base_merged = bg_img * bg_alpha
-
-        # 5. 图层叠加合成 (Normal 模式)
-        # 底层：原图打底，叠加背景
         if base_canvas is not None:
             base_merged = bg_img * bg_alpha + base_canvas * (1.0 - bg_alpha)
         else:
-            # 如果没有连接原图，直接使用分块的归一化颜色，避免因为边缘 alpha<1 导致变黑底
             base_merged = bg_img
 
 
-        # 顶层：手绘框平滑盖上去
         merged = fg_img * fg_alpha + base_merged * (1.0 - fg_alpha)
 
         img_h, img_w = grid["img_h"], grid["img_w"]
