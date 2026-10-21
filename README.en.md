@@ -7,7 +7,7 @@
 
 # ComfyUI-Element_TileUpscale
 
-A tile-based refinement/editing/enlargement node designed for image editing models. It allows models like Qwen-Image 2.1 / Edit 2509 / 2511, FLUX.3/FLUX.2 klein, Krea2 to maintain cross-tile consistency during enlargement with a three-layer mechanism: tile reference ≫ frequency separation fusion > neighbor context. The denoise redraw strength can be safely set to 0.7–1.0 while preserving the identity, structure, and texture of the original image; the reference strength per sampling step can be customized to control the balance between repair strength and consistency; it extends the capabilities of some image editing models (limited to single image). This is something traditional img2img tile enlargement cannot achieve.
+A tile-based refinement/editing/enlargement node designed for image editing models. It allows Qwen-Image 2.1 / Edit 2509 / 2511, FLUX.3/FLUX.2 klein, Krea2 models to maintain cross-tile consistency during tile-based enlargement through a three-layer mechanism: tile reference ≫ frequency separation fusion > neighbor context. Denoise redraw strength can be confidently set to 0.7–1.0 while preserving the identity, structure, and texture of the original image; the reference strength per sampling step can be customized to control the balance between repair strength and consistency; it extends the capabilities of some image editing models (limited to single image). This is something traditional img2img tile-based enlargement cannot achieve. The manual split mode (by Manual) provides true "tile-level semantic isolation" and pixel-level control: you can precisely assign a tile to a "white shirt" and only write "change to blue shirt" in the corresponding Layer's Prompt. Meanwhile, the background, hair, and table not selected in the frame are automatically included in the Gap fill (gap filling) area, they do not receive the shirt-changing instructions (or only receive basic global quality enhancement instructions), thus perfectly maintaining their original state. Additionally, each manually split layer can have its own enlargement size, giving you higher resolution and detail expression when editing or redrawing core areas.
 
 - Krea2 requires [krea2_identity_edit](https://huggingface.co/conradlocke/krea2-identity-edit/tree/main) lora.
 
@@ -22,27 +22,27 @@ A tile-based refinement/editing/enlargement node designed for image editing mode
 
 | Node | Function |
 |---|---|
-| **Element Tiled Upscale** | Integrated node: Enlarge → Split into tiles → Per-tile reference redraw → Frequency separation fusion, one-click output |
-| **Element Tile Split** | Pure geometric splitting + image source input, no model dependency. The backend recalculates geometry in full during execution, while the frontend UI only does preview. |
-| **Element Tile Encode** | Encodes each tile image / prompt into per-tile LATENT + CONDITIONING, sampling is handed over to ComfyUI's native KSampler |
-| **Element Tile Merge** | Merges the list of images decoded per tile using the same low-frequency/high-frequency separation + feathering weights, with optional per-tile color matching |
-| **Element Krea2 In-Context Patch** | Model patch: Allows Krea2 to consume reference latents attached to conditioning with an in-context layout for identity-edit |
-| **Element Strength Schedule** | Model patch: Attaches a gradual reference_strength schedule to the model, for use in ElementTileSplit + native KSampler workflows, KSampler's model input must connect to the output of this node. The integrated node includes the same schedule and ignores upstream attachments, so direct use of its built-in parameters is sufficient for single-node workflows. The i-th value affects the i-th sampling step (starting from 0); if fewer than steps, repeat the last value; if more, truncate; a single value = constant. 1.0 = full reference; 0 = no reference for this step; a pure 0/1 list uses single multiplicative power, while values ≠ 1 for steps with decimals use double forward. Lower parameter settings lead to more drift; to ensure consistency, the first few steps should have high values, and it is recommended to set them to 1, then gradually reduce them for later steps based on the model used, which is more beneficial for repairing flaws. This is ineffective for non-image editing models like sdxl, Qwen image 2512, etc. |
+| **Element Tiled Upscale** | Integrated node: Enlarge → Tile → Per-tile reference redraw → Frequency separation fusion, one-click output |
+| **Element Tile Split** | Pure geometric tiling + image source input, no model dependency. The backend recalculates geometry in full during execution, while the frontend UI only does preview.|
+| **Element Tile Encode** | Encodes each tile image / prompt into per-tile LATENT + CONDITIONING, sampling delegated to ComfyUI's native KSampler |
+| **Element Tile Merge** | Merges the list of images decoded per tile using the same set of low-frequency/high-frequency separation + feathering weights to reconstruct the whole image, optional per-tile color matching |
+| **Element Krea2 In-Context Patch** | Model patch: Allows Krea2 to consume reference latent attached to conditioning in an identity-edit in-context layout |
+| **Element Strength Schedule** | Model patch: Attaches a gradual reference_strength schedule to the model, for use in ElementTileSplit + native KSampler workflows, KSampler's model input must connect to the output of this node. The integrated node includes the same schedule and ignores upstream attachments, while single-node workflows can directly use its built-in parameters. The i-th value affects the i-th sampling step (starting from 0); if fewer than steps, repeat the last value; if more, truncate; a single value = constant. 1.0 = full reference; 0 = no reference for that step; a list of 0/1 only uses single multiplicative power, non-1 values for steps double forward. Lower parameter settings lead to more drift, to ensure consistency, the first few steps should have high values, it is recommended to set the first few steps to 1, and gradually reduce them for the later steps based on the model used, which is more beneficial for repairing flaws. For non-image editing models like sdxl, Qwen image 2512, etc., this is ineffective |
 
 ---
 
 ## Why It's Needed
 
-Almost all traditional tile-based enlargement nodes (TTP, Ultimate SD Upscale and its derivatives) follow the **img2img path**: adding noise to the low-resolution original and feeding it to the model for denoising and reconstruction.
-This path has a **structural flaw**—"redraw strength" and "feature retention" share the same channel, which is the denoising value: low (≤0.4), more original signal is retained, features roughly match, but the model has insufficient redraw freedom → **blur, plasticity, missing details**; high (≥0.5), details and sharpness improve, but the original signal is drowned out by noise → **identity shift, structural changes, cross-tile ghosting**.
-Under the img2img paradigm, this contradiction **cannot be resolved**, as you only have one information channel. Therefore, the denoising value of traditional nodes is effectively locked in the narrow window of 0.1–0.5, and the upper limit of enlargement is also stuck there.
+Almost all traditional tile-based enlargement nodes (TTP, Ultimate SD Upscale and its derivatives) follow the **img2img path**: adding noise to the low-resolution original image and feeding it to the model for denoising and reconstruction.
+This path has a **structural flaw**—"redraw strength" and "feature retention" share the same channel, which is the denoising value: low (≤0.4), more original image signal is retained, featuresHardly match but the model's redraw freedom is insufficient → **blur, plastic feel, missing details**; high (≥0.5), details and sharpness improve, but the original image signal is drowned out by noise → **identity shift, structural changes, cross-tile ghosting**
+Under the img2img paradigm, this contradiction **cannot be reconciled** because you only have one information channel. Therefore, the denoising value of traditional nodes is actually locked in the narrow window of 0.1–0.5, and the upper limit of enlargement is also stuck there.
 
-Element_TileUpscale splits "redraw" and "feature retention" into two independent channels, injecting the original image as an independent reference signal into the model. The reference signal does not participate in adding noise and does not decay with the denoising value. The denoising value **only controls redraw strength, no longer controls feature retention**
+Element_TileUpscale splits "redraw" and "feature retention" into two independent channels, injecting the original image as an independent reference signal into the model, the reference signal does not participate in adding noise, nor does it decay with the denoising value. Denoising value **only controls redraw strength, no longer controls feature retention**
 
-- **Denoise 0.7-1.0**: The target can almost be reconstructed from pure noise (with variations across models), and details are completely generated by the model; at the same time, the model sees the reference image at every step, knowing what content, identity, and texture to generate. **Clarity and consistency are achieved simultaneously.**
-- **Tile reference**: Prevents tiles from acting independently; provides precise local correspondences for each tile to prevent detail misalignment. Allows **cross-tile consistency** even under high denoise.
-- **Low-frequency / High-frequency separation fusion**: During stitching, low-frequency (exposure, color) follows smooth weights, while high-frequency (details, texture) is almost exclusively assigned to weights, avoiding contour ghosting and seam blurring.
-- **Neighbor context**: Already generated adjacent tiles are fed back as input context to the next tile with full intensity, making the model treat them as "content to be continued," rather than relying on overlapping areas to obscure seams. (For reference-anchor models, neighbor context mainly softens the micro-texture of the seam band when denoise < 1; structural and identity consistency is handled by the shared original image reference, which is why redo_first_tile is almost ineffective for editing models.)
+- **Denoise 0.7-1.0**: The target can almost be fully reconstructed from pure noise (with variations across models), details are completely generated by the model; at the same time, the model sees the reference image every step, knowing what content, identity, and texture to generate. **Clarity and consistency are achieved simultaneously.**
+- **Tile Reference**: Prevents tiles from acting independently; provides precise local correspondence for each tile to prevent detail misalignment. Allows **cross-tile consistency** under high denoising.
+- **Low-frequency / High-frequency Separation Fusion**: During stitching, low-frequency (exposure, color) follows smooth weights, high-frequency (details, texture) almost exclusively uses weights, avoiding contour ghosting and seam blurring.
+- **Neighbor Context**: Already generated neighboring tiles provide full strength feedback as input context to the next tile, making the model treat them as "content to be continued", rather than relying on overlapping areas to obscure seamsFuzzy Hybrid. (For reference-anchored models, neighbor context mainly softens the micro-texture of the seam band when denoise < 1; structural and identity consistency is handled by the shared original image reference, which is why redo_first_tile is almost ineffective for editing models.)
 
 ---
 
@@ -50,18 +50,18 @@ Element_TileUpscale splits "redraw" and "feature retention" into two independent
 
 ### 1. Relies on specific model capabilities, not friendly to non-image editing models
 
-- The entire value of the node is built on the **model's ability to reference latent space references**. Using models like SDXL, ordinary Flux t2i, Qwen-Image-2512 without reference capabilities will degrade into a normal tiled img2img—**at this point, it is no better than tools like TTP.**
+- The entire value of the node is built on the **model's ability to reference latent space**. Using models without this capability like SDXL, ordinary Flux t2i, Qwen-Image-2512, etc., it degrades into a normal tiled img2img—**at this point, it is no better than tools like TTP**.
 
-### 2. Model identification depends on reverse engineering, may have cross-version stability issues in comfyUI
+### 2. Model recognition depends on reverse engineering, potential for ComfyUI cross-version instability
 
-- Model identification relies on **substring matching of class names** (`"flux" in type(dm).__name__.lower()`), **tokenizer signature reflection** (`inspect.signature`), and `vars()` traversal. None of these are stable APIs.
-- Krea2's in-context path involves **manual reconstruction of forward propagation**, directly calling `dm.blocks`, `dm.pe_embedder`, `img_slice`, etc. internal structures; the Patch node also depends on core's `extra_conds` object-patch and DIFFUSION_MODEL wrapper mechanisms. Once the upstream model implementation changes (renaming, signature changes, internal layout changes), the node may **silently fail or crash directly**.
+- Model recognition relies on **class name substring matching** (`"flux" in type(dm).__name__.lower()`), **tokenizer signature reflection** (`inspect.signature`), and `vars()` traversal. None of these are stable APIs.
+- Krea2's in-context path involves **manual reconstruction of forward propagation** by directly calling `dm.blocks`, `dm.pe_embedder`, `img_slice`, etc., internal structures; the Patch node also depends on core's `extra_conds` object-patch and DIFFUSION_MODEL wrapper mechanisms. Once the upstream model implementation changes (renaming, signature changes, internal layout changes), the node may **silently fail or crash directly**.
 
-### 3. Higher performance and memory overhead (within acceptable limits)
+### 3. Higher performance and memory overhead (within acceptable range)
 
-- Each tile requires **independent encoding of reference latent**; when grounding is enabled, each tile also needs to **re-run the vision encoding of the text encoder**. The overhead grows linearly with the number of tiles.
-- Krea2's in-context path requires running the full DiT forward pass, with token sequences `text + source + target` three-segment concatenated, attention costs higher than the original.
-- As the number of tokens per tile increases, attention costs grow **quadratically**, so automatic tile sizes are limited to 1024–1536. The training resolution limit for identity-edit LoRA is about 2MP, and tiles should not exceed 2MP (1536²≈2.36MP is already over the limit, 1408²≈1.98MP is close to the limit).
+- Each tile requires **independent encoding of reference latent**; when grounding is enabled, each tile also needs to **go through the text encoder's vision encoding** again. The overhead grows linearly with the number of tiles.
+- Krea2's in-context path requires running the full DiT forward pass, with token sequences `text + source + target` three-section concatenated, attention cost higher than original.
+- As the number of tokens for a tile increases, attention cost grows **quadratically**, thus automatic tile size is limited to 1024–1536. The training resolution limit for identity-edit LoRA is about 2MP, tiles should not exceed 2MP (1536²≈2.36MP is already over the limit, 1408²≈1.98MP is close to the limit).
 
 ### 4. Does not guarantee correctness for unadapted models
 
@@ -85,13 +85,11 @@ Element_TileUpscale splits "redraw" and "feature retention" into two independent
 | **FLUX.2 klein turbo** | **0.7 – 0.8**               | Only reference-latent channel (text encoder is pure text, no vision grounding) | ★★★        | Lacks vision channel, reference signal is one level weaker, easily prone to artifacts and color bias, can use [Smart merge images node](https://github.com/supElement/ComfyUI_Element_easy) for color or deformation correction, can be improved to ★★★☆ when paired with anti-shift LoRA |
 | **Qwen-Image-2512/SDXL series** | **0.2 – 0.5**               | None                        | ★          | Non-editing models lack consistency anchoring, even with methods like ipadapter, the effect is still limited |
 
-- Model combination strategy: It is recommended to use non-distilled models like base or raw, paired with turbo LoRA (weight about 0.8, adjust according to the specific model). This can balance the high-quality detail restoration of the base model with the generation speed of the distilled model, and effectively avoid high-frequency artifacts (artifacts) when directly using pure turbo models.
-
+- Model combination strategy: It is recommended to use non-distilled models like base or raw, paired with turbo LoRA (weight about 0.8, adjust according to the specific model). This can balance the high-quality detail restoration of the base model with the generation speed of the distilled model, and effectively avoid high-frequency artifacts (artifacts) that are easily amplified when using pure turbo models directly.
 - Reference strength curve (reference_strength): It is recommended to use an "early high, late low" tail relaxation curve. For example, when the total steps are 4, you can fill in 1.0, 1.0, 0.9, 0.8. Since turbo models have very few steps, the strength of each step greatly affects the result. It is recommended that the reference strength throughout should not be below 0.7 (otherwise it is prone to image drift); if feature drift occurs in actual use, the curve can be directly flattened to all 1.0.
+- Krea2 model tuning: It is recommended to leave the negative_prompt completely empty. This is because krea2's identity-edit uses an unconditional distribution of "the same image + empty text" during training, leaving it empty aligns perfectly with the training distribution; and when cfg=1.0, the node can also save the encoding time of negative prompt words.
 
-- Krea2 model tuning: It is recommended to leave the negative_prompt completely empty. This is because krea2's identity-edit uses an unconditional distribution of "the same image + empty text" during training, leaving it empty can perfectly align with the training distribution; and when cfg=1.0, the node can also save the encoding time of negative prompt words.
-
-  The above tests are limited in number and have biases and subjective factors, so parameters still need to be adjusted according to different situations. Of course, you can also improve the results by using enhanced LoRA or fine-tuned models, but this is not within the scope of the test.
+The above tests are limited in number and have biases and subjective factors, so parameters still need to be adjusted according to different situations. Of course, you can also improve the results by using enhanced LoRA or fine-tuned models, but this is not within the scope of the tests.
 
 ---
 
@@ -123,7 +121,7 @@ This node will use the same prompt for every text encoding of the tiles, and eac
 
 ### Method 2: Install using Manager
 
-Search for `ComfyUI-Element_TileUpscale` in ComfyUI Manager and click Install.
+Search for `ComfyUI-Element_TileUpscale` in the ComfyUI Manager and click Install.
 
 Dependencies are the ComfyUI itself, no additional installations required.
 ## Parameter Details: [Chinese](md/Description.md) | [English](md/Description_en.md)
@@ -139,7 +137,7 @@ Workflows are already provided in the workflow folder.
 Reduce `tile_size` (more tiles, smaller each). Edit 2509/2511 can further reduce `grounding_px`; Qwen 2.1's `grounding_px` is not involved in the calculation, only `tile_size` can be reduced.
 
 **Can SDXL and other normal models be used?**
-Yes. The node will automatically degenerate into normal img2img, refer to latent being ignored by the model, use denoise to control detail intensity (start with 0.2 – 0.5).
+Yes. The node will automatically degrade to normal img2img. Refer to latent being ignored by the model, use denoise to control detail strength (start with 0.2 – 0.5).
 
 **When using Krea 2 with a single node, do you need to connect a Patch node?**
-`reference_mode` If it's on, you don't need to (internal self-built mechanism similar, connected will be automatically ignored); if it's off (conditioning path) **must** be connected, otherwise the reference is silently discarded by the core. See above Patch node explanation.
+`reference_mode` If it's on, you don't need to (internal self-built mechanism, it will be automatically ignored if connected); if it's off (conditioning path), **it must be connected**, otherwise the reference is silently discarded by the core. See above Patch node explanation.
