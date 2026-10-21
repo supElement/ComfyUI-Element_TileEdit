@@ -735,17 +735,39 @@ def _axis_fades(positions):
     return fades
 
 
+# def _axis_ramp(size, fade_start, fade_end, device, dtype):
+    # """1-D weight ramp: 1.0 in the tile's core, fading to 0 across each overlapping edge."""
+    # ramp = torch.ones(size, device=device, dtype=dtype)
+    # if fade_start + fade_end > size:
+        # scale = size / (fade_start + fade_end)
+        # fade_start = int(fade_start * scale)
+        # fade_end = int(fade_end * scale)
+    # if fade_start > 0:
+        # ramp[:fade_start] *= torch.linspace(0.0, 1.0, fade_start, device=device, dtype=dtype)
+    # if fade_end > 0:
+        # ramp[-fade_end:] *= torch.linspace(1.0, 0.0, fade_end, device=device, dtype=dtype)
+    # return ramp
+
 def _axis_ramp(size, fade_start, fade_end, device, dtype):
-    """1-D weight ramp: 1.0 in the tile's core, fading to 0 across each overlapping edge."""
+    """1-D weight ramp: 1.0 in the tile's core, fading to 0 across each overlapping edge.
+    使用余弦曲线 (Cosine curve) 代替线性插值，使羽化过渡极为平滑。"""
     ramp = torch.ones(size, device=device, dtype=dtype)
     if fade_start + fade_end > size:
         scale = size / (fade_start + fade_end)
         fade_start = int(fade_start * scale)
         fade_end = int(fade_end * scale)
+        
     if fade_start > 0:
-        ramp[:fade_start] *= torch.linspace(0.0, 1.0, fade_start, device=device, dtype=dtype)
+        # 使用 smoothstep (3t^2 - 2t^3) 产生更为顺滑的过渡，在边缘处切线完全水平
+        t = torch.linspace(0.0, 1.0, fade_start, device=device, dtype=dtype)
+        smooth = t * t * (3.0 - 2.0 * t)
+        ramp[:fade_start] *= smooth
+        
     if fade_end > 0:
-        ramp[-fade_end:] *= torch.linspace(1.0, 0.0, fade_end, device=device, dtype=dtype)
+        t = torch.linspace(0.0, 1.0, fade_end, device=device, dtype=dtype)
+        smooth = t * t * (3.0 - 2.0 * t)
+        ramp[-fade_end:] *= smooth.flip(0)
+        
     return ramp
 
 

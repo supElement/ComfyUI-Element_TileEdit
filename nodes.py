@@ -17,7 +17,7 @@ GRID_TYPE = "ELEMENT_TILE_GRID"
 from .common import (
     LATENT_SCALE,
     _CONTEXT_EDGE,
-    _DETAIL_RADIUS,
+    # _DETAIL_RADIUS,
     _parse_strength_schedule,
     _strip_owned_patches,
     _pixel_alignment,
@@ -33,8 +33,8 @@ from .common import (
     _plan_tiles,
     _plan_tiles_count,
     _tile_weight,
-    _detail_weight,
-    _split_frequencies,
+    # _detail_weight,
+    # _split_frequencies,
     _match_channels,
     _sanitize_latent,
 )
@@ -266,21 +266,31 @@ class TiledUpscale:
     
         device, dtype = source.device, source.dtype
         channels = source.shape[-1]
+        # canvas = torch.zeros(1, work_h, work_w, channels, device=device, dtype=dtype)
+        # weight_sum = torch.zeros(1, work_h, work_w, 1, device=device, dtype=dtype)
+        # detail = torch.zeros_like(canvas)
+        # detail_sum = torch.zeros_like(weight_sum)
+        # weight_max = torch.zeros_like(weight_sum)
+        # context = torch.zeros_like(canvas)
+        # for info in tiles:
+            # region = (slice(None), slice(info["y"], info["y"] + info["height"]),
+                      # slice(info["x"], info["x"] + info["width"]), slice(None))
+            # weight_max[region] = torch.maximum(weight_max[region], _tile_weight(info, feather, device, dtype))
+        # detail_radius = max(1, round(overlap * _DETAIL_RADIUS))
+    
+        # def merged_image():
+            # return (canvas / weight_sum.clamp(min=1e-8)) + (detail / detail_sum.clamp(min=1e-8))
+
         canvas = torch.zeros(1, work_h, work_w, channels, device=device, dtype=dtype)
         weight_sum = torch.zeros(1, work_h, work_w, 1, device=device, dtype=dtype)
-        detail = torch.zeros_like(canvas)
-        detail_sum = torch.zeros_like(weight_sum)
-        weight_max = torch.zeros_like(weight_sum)
         context = torch.zeros_like(canvas)
-        for info in tiles:
-            region = (slice(None), slice(info["y"], info["y"] + info["height"]),
-                      slice(info["x"], info["x"] + info["width"]), slice(None))
-            weight_max[region] = torch.maximum(weight_max[region], _tile_weight(info, feather, device, dtype))
-        detail_radius = max(1, round(overlap * _DETAIL_RADIUS))
     
         def merged_image():
-            return (canvas / weight_sum.clamp(min=1e-8)) + (detail / detail_sum.clamp(min=1e-8))
-    
+            return canvas / weight_sum.clamp(min=1e-8)
+
+
+
+
         redo_first = len(tiles) > 1 and redo_first_tile
         previewer = latent_preview.get_previewer(model.load_device, model.model.latent_format)
         state = {"preview": None}
@@ -326,18 +336,56 @@ class TiledUpscale:
             split_images.append(source[:, info["y"]:info["y"] + info["height"], info["x"]:info["x"] + info["width"], :].clone())
         tiles_out = [None] * len(tiles)
     
+        # def place_tile(info, previous=None):
+            # x, y, w, h = info["x"], info["y"], info["width"], info["height"]
+            # region = (slice(None), slice(y, y + h), slice(x, x + w), slice(None))
+            # weight = _tile_weight(info, feather, device, dtype)
+            # detail_weight = _detail_weight(weight, weight_max[region])
+            # if previous is not None:
+                # low, high = _split_frequencies(previous, detail_radius)
+                # canvas[region] -= low * weight
+                # weight_sum[region] -= weight
+                # detail[region] -= high * detail_weight
+                # detail_sum[region] -= detail_weight
+                # context[region] -= previous * weight
+            # source_crop = source[region]
+            # done = weight_sum[region]
+            # blended = context[region] / done.clamp(min=1e-8)
+            # alpha = (done / _CONTEXT_EDGE).clamp(0.0, 1.0)
+            # tile_input = blended * alpha + source_crop * (1.0 - alpha)
+            
+            # noise_seed = (seed + info["tile_id"] * 0x9E3779B97F4A7C15) % (1 << 64)
+            # generated = self._sample_tile(
+                # model, sampling_model,
+                # tile_positive[info["tile_id"]] if tile_positive else positive,
+                # tile_negative[info["tile_id"]] if tile_negative else negative,
+                # vae, tile_input, noise_seed, steps, cfg, sampler_name, scheduler, denoise,
+                # reference_method, source_holder, previewer, state, disable_pbar, attach_reference)
+
+            # if generated.shape[1] != h or generated.shape[2] != w:
+                # generated = F.interpolate(generated.permute(0, 3, 1, 2), size=(h, w),
+                                          # mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
+            # generated = generated.to(device=device, dtype=dtype)
+            # generated = _match_channels(generated, channels)
+            # low, high = _split_frequencies(generated, detail_radius)
+            # canvas[region] += low * weight
+            # weight_sum[region] += weight
+            # detail[region] += high * detail_weight
+            # detail_sum[region] += detail_weight
+            # context[region] += generated * weight
+            # tiles_out[info["tile_id"]] = generated
+            # return generated
+    
         def place_tile(info, previous=None):
             x, y, w, h = info["x"], info["y"], info["width"], info["height"]
             region = (slice(None), slice(y, y + h), slice(x, x + w), slice(None))
             weight = _tile_weight(info, feather, device, dtype)
-            detail_weight = _detail_weight(weight, weight_max[region])
+            
             if previous is not None:
-                low, high = _split_frequencies(previous, detail_radius)
-                canvas[region] -= low * weight
+                canvas[region] -= previous * weight
                 weight_sum[region] -= weight
-                detail[region] -= high * detail_weight
-                detail_sum[region] -= detail_weight
                 context[region] -= previous * weight
+                
             source_crop = source[region]
             done = weight_sum[region]
             blended = context[region] / done.clamp(min=1e-8)
@@ -357,14 +405,14 @@ class TiledUpscale:
                                           mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
             generated = generated.to(device=device, dtype=dtype)
             generated = _match_channels(generated, channels)
-            low, high = _split_frequencies(generated, detail_radius)
-            canvas[region] += low * weight
+            
+            # 直接累加纯像素
+            canvas[region] += generated * weight
             weight_sum[region] += weight
-            detail[region] += high * detail_weight
-            detail_sum[region] += detail_weight
             context[region] += generated * weight
             tiles_out[info["tile_id"]] = generated
             return generated
+    
     
         first_tile = None
         for index, info in enumerate(tiles):

@@ -14,15 +14,24 @@ def _register(name, cls, display):
 
 
 # --- 核心：一体化节点（稳定） ---
-from .nodes import TiledUpscale
-_register("TiledUpscale", TiledUpscale, "Element Tiled Upscale")
+try:
+    from .nodes import TiledUpscale
+    _register("TiledUpscale", TiledUpscale, "Element Tiled Upscale")
+except Exception:
+    logging.warning("[Element TileUpscale] TiledUpscale failed to load:\n%s", traceback.format_exc())
 
-# --- 拆分版节点（实验性） ---
+# --- 拆分版节点 ---
 try:
     from .nodes_split import ElementTileSplit
     _register("ElementTileSplit", ElementTileSplit, "Element Tile Split")
 except Exception:
     logging.warning("[Element TileUpscale] ElementTileSplit failed to load:\n%s", traceback.format_exc())
+
+try:
+    from .nodes_encode import ElementTileEncode
+    _register("ElementTileEncode", ElementTileEncode, "Element Tile Encode")
+except Exception:
+    logging.warning("[Element TileUpscale] ElementTileEncode failed to load:\n%s", traceback.format_exc())
 
 try:
     from .nodes_merge import ElementTileMerge
