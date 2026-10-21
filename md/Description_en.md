@@ -1,4 +1,4 @@
-# Element Tile Upscale Parameter Manual
+# Element_TileEdit Parameter Manual
 
 ---
 
