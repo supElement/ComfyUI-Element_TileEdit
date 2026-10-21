@@ -15,7 +15,7 @@
 
 ---
 
-<img width="2291" height="857" alt="image" src="https://github.com/user-attachments/assets/9725c148-a2ea-41c0-bfe2-607ec64d3c04" />
+<img width="2374" height="1089" alt="image" src="https://github.com/user-attachments/assets/7ef53609-2430-4318-836e-36e142079b14" />
 
 
 ## 节点一览
@@ -23,7 +23,8 @@
 | 节点 | 作用 |
 |---|---|
 | **Element Tiled Upscale** | 一体化节点：放大 → 切块 → 逐块参考重绘 → 频率分离融合，一键出图 |
-| **Element Tile Split** | 只做放大 + 切块 + 逐块编码，输出逐块 LATENT / CONDITIONING / 原图分块，采样交给 ComfyUI 原生 KSampler |
+| **Element Tile Split** | 纯几何分块 + 图像源接入，无模型依赖。后端执行时会全量重算几何，前端 UI 只做预览。|
+| **Element Tile Encode** | 把每块图像 / 提示词编码成 per-tile 的 LATENT + CONDITIONING，采样交给 ComfyUI 原生 KSampler |
 | **Element Tile Merge** | 把逐块解码后的 IMAGE 列表用同一套低频/高频分离 + 羽化权重拼回整图，可选逐块色彩匹配 |
 | **Element Krea2 In-Context Patch** | 模型补丁：让 Krea2 以 identity-edit 的 in-context 布局消费挂在 conditioning 上的参考 latent |
 | **Element Strength Schedule** | 模型补丁：把逐步 reference_strength 调度挂到模型上，供 ElementTileSplit + 原生 KSampler 工作流使用，KSampler 的 model 输入必须接本节点输出。一体化节点内置同款调度且会忽略上游挂载，单节点工作流直接用其自带参数即可。第 i 个值作用于第 i 个采样步（0 起）；少于 steps 重复末值，多于截取；单值 = 恒定。 1.0 = 完全参考；0 = 该步完全无参考；纯 0/1 列表单倍算力，含小数时值≠1 的步双前向。参数设置越低，越会出现漂移，为保证一致性，前几步数值设置要高，建议前几步设置为1，后面几步可根据所使用的模型适当降低，这种设置对修复瑕疵更有利。 对非图像编辑模型，如sdxl、Qwen image 2512等模型无效 |
@@ -126,84 +127,7 @@ Element_TileUpscale 把"重绘"和"保特征"拆成两条独立通道，把原�
 
 ---
 
-## 参数说明
-
-### Element Tiled Upscale（一体化节点）
-
-#### 基本
-
-| 参数 | 说明 |
-|---|---|
-| **model / vae / image / clip** | 基础四件套。clip 必接：逐块 conditioning 由它编码，positive / negative 输入端口已移除 |
-| **upscale_by** | 放大倍率，1.0 = 只做重采样精修不放大 |
-| **tile_mode** | 分块方法：开 by count，关 by size |
-| **columons** | tile_mode 开时（by count）才显示这个参数。宽度平分数量 |
-| **rows** | tile_mode 开时（by count）才显示这个参数。高度平分数量 |
-| **tile_size** | tile_mode 关时（by size）才显示这个参数。每块的重采样分辨率。0 = 自动（长边约 4 块，1024–1536）。块越大总块数越少、单块耗时越长。identity-edit LoRA 下每块请 ≤ 2MP |
-| **overlap** | 相邻切片间的重叠量。0 = 自动：切片尺寸的 15%，上限为 256px（取两者中的较小值）。任何非零值将按原样使用，不设上限。数值越高，接缝越平滑，但计算开销越大（开销随重叠量呈二次方增长） |
-| **feather** | 块间融合的羽化强度，1.0 = 最大平滑，一般不动 |
-| **steps / cfg / sampler / scheduler / denoise / seed** | 与 KSampler 同义，直接套用该模型的官方推荐值 |
-| **prompt** | 必填。逐块与该块像素（vision 输入）一起重新编码，是唯一的正向条件来源，留空会报错 |
-| **negative_prompt** | 留空 = 编码空字符串作为基线负向条件。Krea2 identity-edit 建议保持留空 |
-
-#### 可选（参考图模式组）
-
-| 参数 | 说明 |
-|---|---|
-| **reference_mode** | 开 = Krea2 identity-edit 专用 in-context 路径（节点内部自建参考传递机制，无需接 Patch 节点；即使接了也会被本节点自动摘除）。关 = 通用 conditioning 路径（Krea2 下必须配合 Patch 节点，该 Patch 会正常生效，并与逐步参考强度调度正常叠加） |
-| **redo_first_tile** | 在所有其他图块处理完成后，再次重新生成第一个图块，以便它能将已完成的相邻图块作为上下文参考。此操作仅在存在多个图块时适用。对图像编辑模型影响很小 |
-| **grounding_px** | 逐块文本编码的 vision 输入尺寸，默认 768，含义随模型不同：Edit 2509/2511 为 area 桶，0 或 ≥384 一律使用官方 384×384；Qwen 2.1 忽略此参数（锁定为分块自身尺寸）；Krea2 为视觉输入最长边上限，0 = 分块自身尺寸 |
-| **reference_strength** | 每步参考强度（STRING）。直接填数值列表：1.0, 0.8, 0.5（中英文逗号/顿号/冒号均可），也可接收 [Element_listGraph_Curve](https://github.com/supElement/ComfyUI_Element_easy) 的 strength_string 输出。第 i 个值作用于第 i 个采样步（0 起）；少于 steps 重复末值，多于截取；单值 = 恒定。 1.0 = 完全参考；0 = 该步完全无参考；纯 0/1 列表单倍算力，含小数时值≠1 的步双前向。参数设置越低，越会出现漂移，为保证一致性，前几步数值设置要高，建议前几步设置为1，后面几步可根据所使用的模型适当降低，这种设置对修复瑕疵更有利。 denoise 不影响本参数；vision/grounding 类参考不受本参数影响。对非图像编辑模型，如sdxl、Qwen image 2512等模型无效 |
-
-#### 输出
-
-| 端口 | 内容 |
-|---|---|
-| **image** | 最终拼合完成的整图（主输出） |
-| **split_images** | 切块后的源图列表（调试用） |
-| **resampler_images** | 每块的生成结果列表（调试用，可逐块检查质量） |
-| **grid** | 分块网格描述，供 Element Tile Merge 等下游节点复用 |
-
----
-
-### Element Tile Split
-
-只做放大 + 切块 + 逐块编码，采样交给 ComfyUI 原生 KSampler，适合需要自定义采样细节或插入中间处理的场景。
-
-| 参数 | 说明 |
-|---|---|
-| **model / image / vae / clip** | clip 必接，positive / negative 输入端口已移除，逐块 conditioning 由 clip + prompt / negative_prompt 编码 |
-| **upscale_by** | 放大倍率，1.0 = 只做重采样精修不放大 |
-| **tile_mode** | 分块方法：开 by count，关 by size |
-| **columons** | tile_mode 开时（by count）才显示这个参数。宽度平分数量 |
-| **rows** | tile_mode 开时（by count）才显示这个参数。高度平分数量 |
-| **tile_size** | tile_mode 关时（by size）才显示这个参数。每块的重采样分辨率。0 = 自动（长边约 4 块，1024–1536）。块越大总块数越少、单块耗时越长。identity-edit LoRA 下每块请 ≤ 2MP |
-| **reference_mode** | 开 = Krea 2 identity-edit：逐块输出 vision 槽 grounding + 参考 latent 双通道条件，参考同时挂正负两侧；**必须配合 Patch 节点**（Split 自身不重建前向）。关 = 通用 conditioning 路径 |
-| **grounding_px / prompt / negative_prompt** | 含义与一体化节点相同。Split 没有 reference_strength 参数：逐步强度调度请用 **Element Strength Schedule** 节点挂在 model 上（其输出接 KSampler 的 model 输入） |
-
-**输出**：`tile_positives` / `tile_negatives`（逐块 CONDITIONING 列表）、`tile_latents`（逐块 LATENT 列表）、`grid`（分块网格）、`tile_sources`（原图分块 IMAGE 列表，供 Merge 做色彩匹配参考）。
-
----
-
-### Element Tile Merge
-
-把逐块**解码后**的 IMAGE 列表拼回整图。融合逻辑与一体化节点完全一致：低频走平滑羽化权重、高频走近乎独占的权重。
-
-| 参数 | 说明 |
-|---|---|
-| **tile_images** | 解码后的逐块 IMAGE 列表 |
-| **grid** | Split 输出的分块网格 |
-| **feather** | 块间融合的羽化强度 |
-| **tile_sources** | 可选。Split 输出的原图分块，作为色彩匹配参考 |
-| **color_match_strength** | 0 = 关闭。>0：每个重采样分块与原图对应分块做逐通道 mean/std 色彩迁移（对齐色调、保留细节），需连接 tile_sources |
-
-**输出**：拼合完成的整图。
-
-可以使用另一个扩展中的 [Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 替代，Smart merge images 对色彩和畸变校正的处理结果更好。  
-Smart merge images 支持局部图像拼接，可用下方工作流修复局部画面;   
-注意：提示词中描述了具体的物体元素，但它遵从了在所有分块中都成立的核心原则。  
-
-<img width="2451" height="893" alt="image" src="https://github.com/user-attachments/assets/d5cab444-de86-4afb-92d4-0af5199408a8" />
+## 参数详细说明：[中文](md/Description.md) | [English](md/Description_en.md)
 
 ---
 
