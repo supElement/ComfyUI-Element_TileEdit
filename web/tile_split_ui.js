@@ -306,6 +306,8 @@ function installStyles() {
 .ets-run:hover{background:#1f4a2e}
 .ets-load{width:32px;border-color:#3b4558;background:#252d3a;color:#dce5f5}
 .ets-load:hover{background:#2f3a4c}
+.ets-load:disabled{opacity:.35;cursor:not-allowed}
+.ets-load:disabled:hover{background:#252d3a}
 .ets-tabbtn{padding:3px 10px;border:1px solid #3b4558;background:#252d3a;color:#dce5f5;border-radius:5px;cursor:pointer}
 .ets-tabbtn.on{background:#2a4b7a;border-color:#4e7fc0}
 .ets-field{display:inline-flex;align-items:center;gap:3px;color:#919bad;white-space:nowrap}
@@ -579,6 +581,7 @@ class TileSplitUI {
     const q = s => this.root.querySelector(s);
     this.stageEl = q(".ets-stage"); this.wrapEl = q(".ets-wrap");
     this.imgEl = q(".ets-img"); this.cv = q(".ets-cv");
+    this.loadBtn = q(".ets-load");
     this.placeholderEl = q(".ets-placeholder"); this.statusEl = q(".ets-status");
     this.listEl = q(".ets-list"); this.countEl = q(".ets-count");
     this.pEl = q("textarea.ets-p"); this.nEl = q("textarea.ets-n");
@@ -630,7 +633,10 @@ class TileSplitUI {
       try { await eeRunIsolatedPromptCore(this.node, "TileSplit"); this.status("queued"); }
       catch (e) { this.status("run failed: " + e.message); }
     };
-    this.root.querySelector(".ets-load").onclick = () => this.fileEl.click();
+    this.loadBtn.onclick = () => {
+      if (this.inputConnected()) return;
+      this.fileEl.click();
+    };
     this.stageEl.addEventListener("click", () => {
       if (!this.srcW && !this.inputConnected()) this.fileEl.click();
     });
@@ -665,23 +671,23 @@ class TileSplitUI {
     this.root.addEventListener("dragover", e => e.preventDefault());
     this.root.addEventListener("drop", e => {
       e.preventDefault();
+      if (this.inputConnected()) return;   
       const f = [...(e.dataTransfer?.files || [])].find(f => f.type.startsWith("image/"));
       if (f) this.uploadImage(f);
     });
     this.fileEl.addEventListener("change", e => {
-      if (e.target.files?.[0]) this.uploadImage(e.target.files[0]);
+      if (!this.inputConnected() && e.target.files?.[0]) this.uploadImage(e.target.files[0]);
       e.target.value = "";
     });
     this._unsubs.push(eeAddWindowListener("paste", (e) => {
       if (!this._isActive()) return;
-      for (const it of (e.clipboardData?.items || [])) {
-        if (it.type?.startsWith("image/")) {
-          e.preventDefault(); e.stopPropagation();
-          const f = it.getAsFile();
-          if (f) this.uploadImage(f);
-          return;
-        }
-      }
+      const items = [...(e.clipboardData?.items || [])];
+      const imgItem = items.find(it => it.type?.startsWith("image/"));
+      if (!imgItem) return;
+      e.preventDefault(); e.stopPropagation(); 
+      if (this.inputConnected()) return;        
+      const f = imgItem.getAsFile();
+      if (f) this.uploadImage(f);
     }, true));
     this._unsubs.push(eeAddWindowListener("keydown", (e) => {
       if (e.key !== "Delete" && e.key !== "Backspace") return;
@@ -799,14 +805,30 @@ class TileSplitUI {
       return;
     }
     const s = this.state.source;
-    if (s && s.filename) { this.setImg(this.imgUrl(s), "source", null); return; }
-    if (previewRef && previewRef.filename) {
-      this.setImg(this.imgUrl(previewRef) + "&cb=" + Date.now(), "preview", previewRef);
+    if (s && s.filename) {
+      this.setImg(this.imgUrl(s), "source", null);
       return;
     }
+    this.clearImage();
+  }
+
+  clearImage() {
+    this._imgSeq = (this._imgSeq || 0) + 1; 
     this._imgKind = null;
     this._loadedMeta = null;
+    this._lastDisp = null;
+    this._lastCursor = null;
+    this._lastHoverId = null;
     this.imgEl.removeAttribute("src");
+	this.imgEl.style.display = "none";
+    this.cv.style.cursor = "default";
+    const had = !!(this.srcW || this.srcH || this.state.src_w || this.state.src_h);
+    this.srcW = 0;
+    this.srcH = 0;
+    this.state.src_w = 0;
+    this.state.src_h = 0;
+    if (had) this.saveState();
+    this.render();
   }
   
   hookUpstreamWidget() {
@@ -888,6 +910,7 @@ class TileSplitUI {
   }
 
   async uploadImage(file) {
+    if (this.inputConnected()) return;
     this.status("uploading…");
     try {
       const fd = new FormData();
@@ -901,7 +924,7 @@ class TileSplitUI {
       this.state.source = { filename: d.name, subfolder: d.subfolder || "element_tile_split", type: d.type || "input" };
       this.state.src_w = 0; this.state.src_h = 0;
       this._imgKind = "source";
-	  this._loadedMeta = null;
+      this._loadedMeta = null;
       this.setImg(this.imgUrl(this.state.source), "source", null);
       this.saveState();
       this.status("loaded " + d.name);
@@ -1127,7 +1150,7 @@ class TileSplitUI {
   updateHoverCursor(forceCrosshair = false) {
     if (this.drag) return;
     const s = this.state;
-    if (s.mode !== "manual" || !this._isActive() || !this._lastDisp) return;
+    if (s.mode !== "manual" || !this._isActive() || !this.srcW || !this._lastDisp) return;
     const hit = forceCrosshair ? null : this.hitAt(this._lastDisp);
     const cur = !hit ? "crosshair" : (hit.handle === "move" ? "move" : CUR[hit.handle]);
     const hoverId = hit?.layer.id ?? null;
@@ -1281,7 +1304,9 @@ Ctrl + drag on canvas to draw a layer box</div>`;
     }
     
     this.listEl.innerHTML = html;
-    this.countEl.textContent = `${this.totalTileCount()} tiles · ${this.outCanvasSize().join("×")}px`;
+    this.countEl.textContent = this.srcW
+      ? `${this.totalTileCount()} tiles · ${this.outCanvasSize().join("×")}px`
+      : "no image loaded";
 
     if (manual) this.listEl.querySelectorAll("canvas[data-thumb]").forEach(cv => {
       const l = s.layers.find(x => String(x.id) === cv.dataset.thumb);
@@ -1410,6 +1435,15 @@ Ctrl + drag on canvas to draw a layer box</div>`;
   }
 
   /* ===== 状态/头部同步 ===== */
+  syncLoadButton() {
+    if (!this.loadBtn) return;
+    const connected = this.inputConnected();
+    this.loadBtn.disabled = connected;
+    this.loadBtn.title = connected
+      ? "Image input connected — local load disabled\n(disconnect the image input to load a local image)"
+      : "加载本地图像文件 | Load image file";
+  }
+  
   syncHead() {
     const s = this.state;
     this.root.classList.toggle("m-manual", s.mode === "manual");
@@ -1438,9 +1472,12 @@ Ctrl + drag on canvas to draw a layer box</div>`;
     this.root.querySelectorAll('.ets-ov-toggle').forEach(btn => {
       btn.classList.toggle("ovon", s.overlap_mode === btn.dataset.ov);
     });
+    this.syncLoadButton();
   }
   render() {
     this.syncHead(); this.layoutCanvas(); this.buildList(); this.draw(); this.syncPromptPanel();
+    const hasImg = !!(this.srcW && this.imgEl.getAttribute("src"));
+    this.imgEl.style.display = hasImg ? "" : "none";
     if (!this.srcW) {
       this.placeholderEl.style.display = "flex";
       this.placeholderEl.textContent = this.inputConnected()
@@ -1553,7 +1590,7 @@ app.registerExtension({
         if (size[1] < MIN_NODE_HEIGHT) size[1] = MIN_NODE_HEIGHT;
         return size;
       };
-      if (typeof node.id !== "number" || node.id < 0) node.size = [900, 640];
+      if (typeof node.id !== "number" || node.id < 0) node.size = [700, 640];
       node.onResize = function () {
         node.__ets?.layoutCanvas();
         node.__ets?.draw();
@@ -1569,6 +1606,7 @@ app.registerExtension({
       this.__etsConnT = setTimeout(() => {
         this.__ets?.hookUpstreamWidget();
         this.__ets?.bindImageSource();
+        this.__ets?.syncLoadButton();
       }, 250);
       return r;
     };
