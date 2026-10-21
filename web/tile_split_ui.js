@@ -692,6 +692,15 @@ class TileSplitUI {
       e.preventDefault(); e.stopPropagation();
       this.deleteLayer(this.state.selected);
     }, true));
+	
+    const onCtrlKey = (down) => (e) => {
+      if (e.key !== "Control" && e.key !== "Meta") return;
+      if (!this._isActive() || !this._lastDisp) return;
+      this.updateHoverCursor(down);
+    };
+    this._unsubs.push(eeAddWindowListener("keydown", onCtrlKey(true), true));
+    this._unsubs.push(eeAddWindowListener("keyup", onCtrlKey(false), true));
+	
     const pdeb = fn => { clearTimeout(this._ptimer); this._ptimer = setTimeout(fn, 350); };
     this.pEl.addEventListener("input", () => {
       const t = this.promptTarget();
@@ -1096,6 +1105,9 @@ class TileSplitUI {
     try { this.cv.setPointerCapture(e.pointerId); } catch (_) {}
     if (e.ctrlKey || e.metaKey) {
       this.drag = { type: "new", x0: sx, y0: sy, x1: sx, y1: sy };
+      this._lastCursor = "crosshair";
+      this._lastHoverId = null;
+      this.cv.style.cursor = "crosshair";
       return;
     }
     const hit = this.hitAt(dp);
@@ -1111,24 +1123,45 @@ class TileSplitUI {
       this.selectLayer(null, true);
     }
   }
+  
+  updateHoverCursor(forceCrosshair = false) {
+    if (this.drag) return;
+    const s = this.state;
+    if (s.mode !== "manual" || !this._isActive() || !this._lastDisp) return;
+    const hit = forceCrosshair ? null : this.hitAt(this._lastDisp);
+    const cur = !hit ? "crosshair" : (hit.handle === "move" ? "move" : CUR[hit.handle]);
+    const hoverId = hit?.layer.id ?? null;
+    if (this._lastCursor !== cur || this._lastHoverId !== hoverId) {
+      this._lastCursor = cur;
+      this._lastHoverId = hoverId;
+      this.cv.style.cursor = cur;
+    }
+  }
+  
   onCanvasMove(e) {
     const dp = this.toDisp(e);
     const [sx, sy] = this.toSrc(e);
     const d = this.drag, s = this.state, div = s.div, min = div * MIN_DIVS;
+    this._lastDisp = dp;                       
+
     if (!d) {
-      if (s.mode === "manual" && this._isActive()) {
-        const hit = this.hitAt(dp);
-        const cur = !hit ? "crosshair" : (hit.handle === "move" ? "move" : CUR[hit.handle]);
-        if (this._lastCursor !== cur || this._lastHoverId !== (hit?.layer.id ?? null)) {
-            this._lastCursor = cur;
-            this._lastHoverId = hit?.layer.id ?? null;
-            this.cv.style.cursor = cur;
-        }
-      }
+      this.updateHoverCursor(e.ctrlKey || e.metaKey);
       return;
     }
 
-    if (d.type === "new") { d.x1 = sx; d.y1 = sy; this.previewNewRect = { ...d }; this.draw(); return; }
+    if (d.type === "new") {
+      if (this._lastCursor !== "crosshair") {
+        this._lastCursor = "crosshair";
+        this._lastHoverId = null;
+        this.cv.style.cursor = "crosshair";
+      }
+      d.x1 = sx; d.y1 = sy;
+      this.previewNewRect = { ...d };
+      this.draw();
+      return;
+    }
+
+    // if (d.type === "new") { d.x1 = sx; d.y1 = sy; this.previewNewRect = { ...d }; this.draw(); return; }
     const l = s.layers.find(x => x.id === d.id);
     if (!l) return;
     if (d.type === "move") {
@@ -1145,7 +1178,7 @@ class TileSplitUI {
     }
     this.draw();
   }
-  onCanvasUp() {
+  onCanvasUp(e) {
     const d = this.drag;
     this.drag = null; this.previewNewRect = null;
     if (!d) return;
@@ -1154,6 +1187,7 @@ class TileSplitUI {
       this.clampLayer(this.state.layers.find(x => x.id === d.id));
       this.saveState(); this.render();
     }
+    this.updateHoverCursor(!!(e && (e.ctrlKey || e.metaKey)));
   }
   finalizeNew(d) {
     const div = this.state.div, min = div * MIN_DIVS;
