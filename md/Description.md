@@ -245,7 +245,9 @@
 
 - **`tile_sources` 不接时 `color_match_strength` 完全无效**。
 - **`original_image` 当split节点选择了手动分割模式，fill gaps 未激活时，不接这个端口，缺失分块的未覆盖区会透出黑底。
-- `feather = 0` 等于硬拼。
+- `feather = 0` 等于硬拼。  
+
+可以使用另一个扩展中的 [Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 替代，Smart merge images 对色彩和畸变校正的处理结果更好。
 
 ---
 
@@ -313,3 +315,5 @@
 - **必须接在 KSampler 的 model 输入上**。Split 不输出 MODEL，接在 Split 后面完全无效。
 - **不要和 TiledUpscale 一起用**：一体化内部已挂同名 patch，重复接会被 `_strip_owned_patches` 摘掉再重挂，属于多余操作。
 - 分隔符里"小数请用英文句点 `0.8`"，用中文句点会解析失败。
+- 可接收 [Element_listGraph_Curve](https://github.com/supElement/ComfyUI_Element_easy) 的 strength_string 输出。
+- 参数设置越低，越会出现漂移，为保证一致性，前几步数值设置要高，建议前几步设置为1，后面几步可根据所使用的模型适当降低，这种设置对修复瑕疵更有利。 denoise 不影响本参数；vision/grounding 类参考不受本参数影响。对非图像编辑模型，如sdxl、Qwen image 2512等模型无效。
