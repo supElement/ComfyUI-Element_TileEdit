@@ -246,7 +246,7 @@ Stitches each tile's generated result back onto the canvas using `grid`.
 - **Without `tile_sources`, `color_match_strength` is completely ineffective**.
 - **When Split is in manual mode and `fill gaps` is not active**, not connecting `original_image` causes uncovered missing areas to show black underlay.
 - `feather = 0` equals hard stitching.
-
+- You can use the [Smart merge images node](https://github.com/supElement/ComfyUI_Element_easy) from another extension as a replacement; it provides better results for color and distortion correction.
 ---
 
 ## ElementKrea2InContextPatch (Model Patch)
@@ -313,3 +313,5 @@ Attaches a per-step `reference_strength` schedule to the model.
 - **Must be connected to KSampler's model input**. Split doesn't output MODEL; connecting it after Split does nothing.
 - **Don't use it together with TiledUpscale**: the all-in-one already attaches the same-named patch internally; re-attaching gets stripped by `_strip_owned_patches` and re-added, which is redundant.
 - For decimal separators, **use the English period `0.8`**; Chinese periods will fail to parse.
+- Can accept the `strength_string` output from [Element_listGraph_Curve](https://github.com/supElement/ComfyUI_Element_easy).
+- Lower parameter values ​​increase the likelihood of "drift." To ensure consistency, use higher values ​​for the initial steps—ideally, set the value to 1 for the first few steps. For subsequent steps, the value can be adjusted downward depending on the specific model being used; this approach is more effective for correcting imperfections. This parameter is independent of the `denoise` setting and does not affect vision- or grounding-based references. It is not applicable to models not designed for image editing (e.g., SDXL, Qwen-Image-2512, etc.).
