@@ -190,10 +190,8 @@ function edgeFullyCovered(B, R) {
 function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = GAP_TARGET_TILES) {
   if (!regions.length) return balancedSubsplit([{ x: 0, y: 0, w: outW, h: outH }], gapMax);
 
-  // 1. 先不考虑手绘框，即先均分
   const baseGrid = balancedSubsplit([{ x: 0, y: 0, w: outW, h: outH }], gapMax);
 
-  // 2. 考虑手绘框，只有边被完全覆盖才切割（否则保留整块）
   let pieces = [];
   for (const b of baseGrid) {
     let parts = [[b.x, b.y, b.w, b.h]];
@@ -213,7 +211,6 @@ function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = 
     pieces.push(...parts);
   }
 
-  // 3. 若切割后出现比例大于5：1的长条合并到邻居分块
   let changed = true;
   while (changed) {
     changed = false;
@@ -223,7 +220,6 @@ function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = 
       if (Math.max(w, h) / Math.max(1, Math.min(w, h)) <= 5.0) continue;
 
       const ox = x, oy = y, ow = w, oh = h;
-      // 长条向外扩展（稍微覆盖手绘框），直到比例降至 5:1
       if (w > h) {
         const diff = w / 5.0 - h;
         let expandT = Math.min(y, diff / 2);
@@ -246,7 +242,6 @@ function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = 
         w = Math.min(outW - x, Math.ceil(w + diff));
       }
 
-      // 扩展后的矩形，如果与其他块重叠，就合并到邻居分块（取外接矩形）
       let nx = x, ny = y, nw = w, nh = h;
       for (let j = 0; j < pieces.length; j++) {
         if (i === j || !pieces[j]) continue;
@@ -258,11 +253,10 @@ function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = 
           nx = nx2; ny = ny2;
           nw = Math.max(nx + nw, qx + qw) - nx;
           nh = Math.max(ny + nh, qy + qh) - ny;
-          pieces[j] = null; // 吸收了
+          pieces[j] = null; 
         }
       }
       
-      // 只有尺寸发生变化才更新，防止贴边时无限循环
       if (nx !== ox || ny !== oy || nw !== ow || nh !== oh) {
         pieces[i] = [nx, ny, nw, nh];
         changed = true;
@@ -271,7 +265,6 @@ function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = 
     if (changed) pieces = pieces.filter(p => p !== null);
   }
 
-  // 4. 若合并后超过max side参数，则对这个分块做平分
   let finalPieces = [];
   for (const p of pieces) {
     if (p[2] > gapMax || p[3] > gapMax) {
@@ -282,7 +275,6 @@ function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = 
     }
   }
 
-  // 清理因扩展合并可能产生的微调重叠
   const cleanPieces = [];
   for (const p of finalPieces) {
     let parts = [p];
@@ -318,12 +310,42 @@ function installStyles() {
 .ets-tabbtn.on{background:#2a4b7a;border-color:#4e7fc0}
 .ets-field{display:inline-flex;align-items:center;gap:3px;color:#919bad;white-space:nowrap}
 .ets-field input[type=number]{width:44px;height:22px;padding:1px 4px;background:#0d1118;color:#e9eef8;border:1px solid #333d50;border-radius:4px;outline:none}
-.ets-field input#ets-gmax, .ets-field input#ets-ovpx, .ets-field input#ets-ovpct{width:56px} /* 扩宽 max side 和 overlap 的输入框 */
+.ets-field input#ets-gmax, .ets-field input#ets-ovpx, .ets-field input#ets-ovpct, .ets-field input#ets-utile{width:56px} /* 扩宽特定输入框防止数字显示不全 */
 .ets-field input.ovon{border-color:#43d9d1}
+
+.ets-ov-toggle {
+  padding: 0 6px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #3b4558;
+  background: #252d3a;
+  color: #919bad;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  margin-right: 4px; /* 与输入框拉开一点距离 */
+  transition: all 0.2s;
+}
+.ets-ov-toggle:hover { 
+  background: #2f3a4c; 
+  color: #dce5f5; 
+}
+.ets-ov-toggle.ovon { 
+  background: #2a4b7a; 
+  border-color: #4e7fc0; 
+  color: #fff; 
+}
 .ets-field input[type=checkbox]{accent-color:#43d9d1;width:14px;height:14px}
 .ets-status{margin-left:auto;color:#919bad;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}
+
 .ets .only-count,.ets .only-size,.ets .only-manual{display:none}
-.ets.m-count .only-count{display:inline-flex}.ets.m-size .only-size{display:inline-flex}.ets.m-manual .only-manual{display:inline-flex}
+.ets.m-count .only-count{display:inline-flex; gap: 12px; align-items: center;}
+.ets.m-size .only-size{display:inline-flex}
+.ets.m-manual .only-manual{display:inline-flex; gap: 12px; align-items: center; margin-left: 12px;}
+
 .ets-body{display:flex;min-height:0;flex:1}
 .ets-canvaswrap{flex:1;min-width:0;display:flex}
 .ets-stage{flex:1;display:flex;align-items:center;justify-content:center;position:relative;background:#0d1118;overflow:hidden}
@@ -342,6 +364,8 @@ function installStyles() {
 .ets-rowmain{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
 .ets-rowparams{display:flex;gap:4px;flex-wrap:nowrap;align-items:center;color:#919bad}
 .ets-rowparams input{width:32px;height:20px;padding:0 2px;background:#0d1118;color:#e9eef8;border:1px solid #333d50;border-radius:4px;outline:none}
+.ets-rowparams input[data-f="upscale"]{width:52px} /* 单独加宽 upscale 输入框 */
+.ets-rowparams label{display:inline-flex; align-items:center; gap:4px;}
 .ets-del{border:none;background:transparent;color:#ef6a77;cursor:pointer;font-size:13px;padding:2px 4px;flex-shrink:0}
 .ets-del:hover{color:#ff9aa5}
 .ets-row.gaprow{cursor:default;opacity:.85}
@@ -362,16 +386,13 @@ body.ets-reordering,body.ets-reordering *{cursor:grabbing !important}
 /* ---------- stateWidget 绑定（onNodeCreated 与 onConfigure 共用）---------- */
 function bindStateWidget(node, sw) {
   if (!sw) return false;
-  // 闭包式 serializeValue：不依赖 this，任何前端路径下 graphToPrompt 都能取到当前值
   sw.serializeValue = () => sw.value;
   const origCb = sw.callback;
   sw.callback = function (v) {
     const rv = origCb?.call(this, v);
-    // 修复：绝对不能在这里调用 loadFromState()，否则会引发重绘死循环，导致输入框光标闪烁、按钮失效
     return rv;
   };
   if (node.__ets && node.__ets.stateWidget !== sw) {
-    // 迟到绑定（widgets 就绪晚于 UI 构造）：补挂并立即按当前值恢复一次
     node.__ets.stateWidget = sw;
     node.__ets._suppressLoadOnce = false;
     node.__ets.loadFromState();
@@ -434,7 +455,6 @@ class TileSplitUI {
     if (!this.stateWidget) return;
     this._suppressLoadOnce = true;
     
-    // 移除 state 内部的 _ts，只在 localStorage 里使用，避免破坏后端节点的缓存
     const ts = Date.now(); 
     const newVal = JSON.stringify(this.state);
     
@@ -495,10 +515,10 @@ class TileSplitUI {
   
   <span class="only-count">
     <label class="ets-field" title="列数 | Columns count">
-      C <input type="number" id="ets-ucols" min="1" max="16" step="1">
+      Cols <input type="number" id="ets-ucols" min="1" max="16" step="1">
     </label>
     <label class="ets-field" title="行数 | Rows count">
-      R <input type="number" id="ets-urows" min="1" max="16" step="1">
+      Rows <input type="number" id="ets-urows" min="1" max="16" step="1">
     </label>
   </span>
   
@@ -509,10 +529,10 @@ class TileSplitUI {
   </span>
   
   <span class="ets-field" title="相邻分块的重叠像素 | Overlap pixels between tiles">
-    overlap <input type="number" id="ets-ovpx" min="0" max="2048" step="8">px
+    overlap <span class="ets-ov-toggle" data-ov="px">px</span><input type="number" id="ets-ovpx" min="0" max="2048" step="8">
   </span>
   <span class="ets-field" title="相邻分块的重叠百分比 | Overlap percentage between tiles">
-    <input type="number" id="ets-ovpct" min="0" max="45" step="1">%
+    <span class="ets-ov-toggle" data-ov="pct">%</span><input type="number" id="ets-ovpct" min="0" max="45" step="1">
   </span>
   
   <span class="only-manual">
@@ -534,7 +554,7 @@ class TileSplitUI {
       <div style="display:flex; align-items:center; gap:6px;">
         <span>Layers</span>
         <label class="ets-field" title="开启时图层独立放大参数生效 | Enable independent layer upscale" style="font-size:11px; margin-left:4px;">
-          <input type="checkbox" id="ets-lup" style="margin:0;"> ind. up
+          <input type="checkbox" id="ets-lup" style="margin:0;"> alone
         </label>
       </div>
       <span class="ets-count"></span>
@@ -563,12 +583,11 @@ class TileSplitUI {
     this.listEl = q(".ets-list"); this.countEl = q(".ets-count");
     this.pEl = q("textarea.ets-p"); this.nEl = q("textarea.ets-n");
     this.hintEl = q(".ets-hint"); this.fileEl = q(".ets-file");
-    // 整个面板滚轮转发给 ComfyUI 画布（缩放）；仅“真正可滚动”的区域保留原生滚动
+
     eeMarkForward(this.root);
     this.pEl.setAttribute("data-ee-native-scroll", "");
     this.nEl.setAttribute("data-ee-native-scroll", "");
-    
-    // 移除一切事件拦截，DOM 原生的冒泡机制完全可以自己处理点击。不再加 preventDefault 或 stopPropagation。
+
   }
   _isActive() {
     try {
@@ -625,10 +644,20 @@ class TileSplitUI {
     onNum("ets-urows", v => { this.state.unified.rows = clamp(Math.round(v) || 2, 1, 16); });
     onNum("ets-utile", v => { this.state.unified.tile_size = clamp(roundDiv(v || 1024, this.state.div), this.state.div, 8192); });
     onNum("ets-gmax", v => { this.state.gap_max_px = clamp(roundDiv(v || 1536, this.state.div), this.state.div, 8192); });
-    onNum("ets-ovpx", v => { this.state.overlap_px = Math.max(0, Math.round(v)); this.state.overlap_mode = "px"; });
-    onNum("ets-ovpct", v => { this.state.overlap_pct = clamp(v || 0, 0, 45); this.state.overlap_mode = "pct"; });
-    const fg = this.root.querySelector("#ets-fg");
+    onNum("ets-ovpx", v => { this.state.overlap_px = Math.max(0, Math.round(v)); });
+    onNum("ets-ovpct", v => { this.state.overlap_pct = clamp(v || 0, 0, 45); });
+	
+    this.root.querySelectorAll('.ets-ov-toggle').forEach(btn => {
+      btn.onclick = () => {
+        this.state.overlap_mode = btn.dataset.ov;
+        this.saveState(); 
+        this.render();
+      };
+    });
+	
+	const fg = this.root.querySelector("#ets-fg");
     fg.addEventListener("change", () => { this.state.fill_gaps = fg.checked; this.saveState(); this.render(); });
+
     this.cv.addEventListener("pointerdown", e => this.onCanvasDown(e));
     this.cv.addEventListener("pointermove", e => this.onCanvasMove(e));
     this.cv.addEventListener("pointerup", e => this.onCanvasUp(e));
@@ -672,8 +701,6 @@ class TileSplitUI {
       const t = this.promptTarget();
       if (t) { t.obj[t.nk] = this.nEl.value; pdeb(() => this.saveState()); }
     });
-
-    // 移除了 400ms 的 _selTimer 定时器，避免打断输入和引发多余的渲染
 
     this._ro = new ResizeObserver(() => {
       clearTimeout(this._roT);
@@ -804,7 +831,6 @@ class TileSplitUI {
     out = out || {};
     let changed = false;
     
-    // 检查源图尺寸是否变化
     if (out.src && out.src.w) {
       if (this.state.src_w !== out.src.w || this.state.src_h !== out.src.h) {
         this.state.src_w = out.src.w | 0;
@@ -815,7 +841,6 @@ class TileSplitUI {
       }
     }
     
-    // 检查预览图引用是否变化
     const ref = out.preview;
     if (ref && ref.filename) {
       const pr = { 
@@ -835,7 +860,6 @@ class TileSplitUI {
       }
     }
     
-    // 更新界面显示的图像
     const srcW = out.src ? out.src.w : 0, srcH = out.src ? out.src.h : 0;
     if (out.bg_image && out.bg_image.length > 0) {
       const img = out.bg_image[0];
@@ -1199,7 +1223,6 @@ class TileSplitUI {
 <span class="ets-badge" style="background:${l.color}">${i + 1}</span>
 <div class="ets-rowmain">
   <div class="ets-rowparams">
-    <!-- 修改这里，加入 disabled 判断 -->
     <label title="该图层独立的放大倍数 | Independent upscale factor for this layer">upscale<input type="number" step="0.1" min="0.1" max="16" value="${l.upscale}" data-f="upscale" ${upDisabled ? 'disabled style="opacity:0.4"' : ''}></label>
   </div>
   <div class="ets-rowparams">
@@ -1234,11 +1257,10 @@ Ctrl + drag on canvas to draw a layer box</div>`;
       const id = Number(row.dataset.id) || row.dataset.id;
       row.addEventListener("pointerdown", e => this.onRowDown(e, id));
       
-      // 修复：删除按钮直接绑定 onclick
       row.querySelector(".ets-del").onclick = e => { e.stopPropagation(); this.deleteLayer(id); };
       
       row.querySelectorAll("input[data-f]").forEach(inp => {
-        // 修复：使用 input 实时更新，不触发全量重绘
+        // 使用 input 实时更新，不触发全量重绘
         inp.addEventListener("input", () => {
           const l = s.layers.find(x => String(x.id) === String(id));
           if (!l) return;
@@ -1249,7 +1271,7 @@ Ctrl + drag on canvas to draw a layer box</div>`;
           this.saveState(); 
           this.draw(); 
         });
-        // 修复：失去焦点时同步数值，且不触发整个页面的重建
+        // 失去焦点时同步数值，且不触发整个页面的重建
         inp.addEventListener("change", () => {
           const l = s.layers.find(x => String(x.id) === String(id));
           if (!l) return;
@@ -1379,9 +1401,9 @@ Ctrl + drag on canvas to draw a layer box</div>`;
     const gapp = this.root.querySelector("#ets-gappend");
     if (document.activeElement !== gapp) gapp.checked = !!s.global_append;
 	
-    const ovpx = this.root.querySelector("#ets-ovpx"), ovpct = this.root.querySelector("#ets-ovpct");
-    ovpx.classList.toggle("ovon", s.overlap_mode === "px");
-    ovpct.classList.toggle("ovon", s.overlap_mode === "pct");
+    this.root.querySelectorAll('.ets-ov-toggle').forEach(btn => {
+      btn.classList.toggle("ovon", s.overlap_mode === btn.dataset.ov);
+    });
   }
   render() {
     this.syncHead(); this.layoutCanvas(); this.buildList(); this.draw(); this.syncPromptPanel();
