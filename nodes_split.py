@@ -33,6 +33,9 @@ GRID_TYPE = "ELEMENT_TILE_GRID"
 PREVIEW_MAX_EDGE = 2048   # 执行后节点内预览长边上限（仅预览，不影响输出）
 MAX_TILES = 256
 
+# 与前端 CORNER_RADIUS_SCALES_WITH_UPSCALE 保持一致
+CORNER_RADIUS_SCALES_WITH_UPSCALE = True
+
 # ================================================================
 # Gap 规划 v4：core 禁区 + B&B 精确最少覆盖 + 块数目标驱动的自动加深覆盖
 # ================================================================
@@ -108,6 +111,10 @@ def _norm_layers(data):
             "rows": _clamp(int(l.get("rows", 1) or 1), 1, 16),
             "prompt": str(l.get("prompt", "") or ""),
             "negative": str(l.get("negative", "") or ""),
+            "r_tl": max(0, int(l.get("r_tl", 0) or 0)),
+            "r_tr": max(0, int(l.get("r_tr", 0) or 0)),
+            "r_bl": max(0, int(l.get("r_bl", 0) or 0)),
+            "r_br": max(0, int(l.get("r_br", 0) or 0)),
         })
     return layers
 
@@ -357,24 +364,47 @@ def _rect_subtract(a, b):
         out.append((ix2, iy1, ax + aw - ix2, iy2 - iy1))
     return out
 
+def _get_inset_rect(R):
+    if isinstance(R, dict):
+        rx, ry, rw, rh = R["x"], R["y"], R["w"], R["h"]
+        rtl = R.get("rtl", 0); rtr = R.get("rtr", 0)
+        rbl = R.get("rbl", 0); rbr = R.get("rbr", 0)
+    else:
+        rx, ry, rw, rh = R
+        rtl = rtr = rbl = rbr = 0
+    
+    w = rw - rtl - rtr
+    h = rh - rtl - rbr
+    if w > 0 and h > 0:
+        return (rx + rtl, ry + rtl, w, h)
+    return (rx, ry, rw, rh)
+
 def _edge_fully_covered(B, R):
-    """判断矩形 R 是否完整跨越了矩形 B 的某一条边。"""
     bx, by, bw, bh = B
-    rx, ry, rw, rh = R
+    if isinstance(R, dict):
+        rx, ry, rw, rh = R["x"], R["y"], R["w"], R["h"]
+    else:
+        rx, ry, rw, rh = R
+
     ix1, iy1 = max(bx, rx), max(by, ry)
     ix2, iy2 = min(bx + bw, rx + rw), min(by + bh, ry + rh)
     if ix1 >= ix2 or iy1 >= iy2:
         return False
-    
+
+    def _inside(px, py):
+        return rx - 1e-6 <= px <= rx + rw + 1e-6 and ry - 1e-6 <= py <= ry + rh + 1e-6
+
     if rx <= bx and rx + rw >= bx + bw and ry <= by and ry + rh > by:
-        return True
+        if _inside(bx, by) and _inside(bx + bw, by): return True
     if rx <= bx and rx + rw >= bx + bw and ry < by + bh and ry + rh >= by + bh:
-        return True
+        if _inside(bx, by + bh) and _inside(bx + bw, by + bh): return True
     if ry <= by and ry + rh >= by + bh and rx <= bx and rx + rw > bx:
-        return True
+        if _inside(bx, by) and _inside(bx, by + bh): return True
     if ry <= by and ry + rh >= by + bh and rx < bx + bw and rx + rw >= bx + bw:
-        return True
+        if _inside(bx + bw, by) and _inside(bx + bw, by + bh): return True
     return False
+
+
 
 def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
                     regions=None, target_tiles=GAP_TARGET_TILES):
@@ -388,13 +418,16 @@ def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
     for b in base_grid:
         parts = [b]
         for rg in regions:
-            rr = (rg["x"], rg["y"], rg["w"], rg["h"])
+            rr_dict = rg if isinstance(rg, dict) else {"x": rg[0], "y": rg[1], "w": rg[2], "h": rg[3]}
+            # 计算内缩矩形用于切割
+            rr_inset = _get_inset_rect(rr_dict)
             nxt = []
             for p in parts:
-                if _edge_fully_covered(p, rr):
-                    nxt.extend(_rect_subtract(p, rr))
+                # 判断是否覆盖仍然用带圆角的 rr_dict
+                if _edge_fully_covered(p, rr_dict):
+                    nxt.extend(_rect_subtract(p, rr_inset))
                 else:
-                    nxt.append(p) 
+                    nxt.append(p)
             parts = nxt
             if not parts: break
         pieces.extend(parts)
@@ -633,12 +666,17 @@ class ElementTileSplit:
                     "x": t["x"], "y": t["y"], "width": t["w"], "height": t["h"],
                     "col": t.get("col", 0), "row": t.get("row", 0),
                     "layer": layer_index, "layer_id": layer["id"] if layer else None,
-                    "upscale": up_val,  
+                    "upscale": up_val,
                     "kind": t.get("kind", "layer"),
                     "fade_top": t.get("fade_top", 0),
                     "fade_bottom": t.get("fade_bottom", 0),
                     "fade_left": t.get("fade_left", 0),
                     "fade_right": t.get("fade_right", 0),
+                    "radius_tl": t.get("radius_tl", 0),
+                    "radius_tr": t.get("radius_tr", 0),
+                    "radius_bl": t.get("radius_bl", 0),
+                    "radius_br": t.get("radius_br", 0),
+                    "layer_region": t.get("layer_region"),
                 })
 
         manual_mode = mode == "manual"
@@ -646,6 +684,7 @@ class ElementTileSplit:
 
         if manual_mode:
             layer_regions = []
+            scale_r = u_up if CORNER_RADIUS_SCALES_WITH_UPSCALE else 1.0
             for l in layers:
                 rx = _clamp(_snap(l["x"] * u_up, div), 0, out_w - div)
                 ry = _clamp(_snap(l["y"] * u_up, div), 0, out_h - div)
@@ -657,7 +696,17 @@ class ElementTileSplit:
                     rh = out_h - ry
                 else:
                     rh = _clamp(_snap(l["h"] * u_up, div), div, out_h - ry)
-                layer_regions.append((l, {"x": rx, "y": ry, "w": rw, "h": rh}))
+
+                half_lim = max(1, min(rw, rh) // 2)
+                rtl = min(int(round(l.get("r_tl", 0) * scale_r)), half_lim)
+                rtr = min(int(round(l.get("r_tr", 0) * scale_r)), half_lim)
+                rbl = min(int(round(l.get("r_bl", 0) * scale_r)), half_lim)
+                rbr = min(int(round(l.get("r_br", 0) * scale_r)), half_lim)
+
+                layer_regions.append((l, {
+                    "x": rx, "y": ry, "w": rw, "h": rh,
+                    "rtl": rtl, "rtr": rtr, "rbl": rbl, "rbr": rbr,
+                }))
 
             if fill_gaps:
                 cols_n, rows_n = out_w // div, out_h // div
@@ -682,6 +731,11 @@ class ElementTileSplit:
                                      l["cols"], l["rows"], ov)
                 for s in subs:
                     s["kind"] = "layer"
+                    s["radius_tl"] = rg["rtl"]
+                    s["radius_tr"] = rg["rtr"]
+                    s["radius_bl"] = rg["rbl"]
+                    s["radius_br"] = rg["rbr"]
+                    s["layer_region"] = (rg["x"], rg["y"], rg["w"], rg["h"])
                 emit(subs, layer=l, layer_index=li)
 
             if not layer_regions and not fill_gaps:
@@ -773,7 +827,16 @@ class ElementTileSplit:
                 "fade_bottom": t.get("fade_bottom", 0),
                 "fade_left": t.get("fade_left", 0),
                 "fade_right": t.get("fade_right", 0),
-                "weight_mult": t.get("weight_mult", 1.0), 
+                "weight_mult": t.get("weight_mult", 1.0),
+                "radius_tl": t.get("radius_tl", 0),
+                "radius_tr": t.get("radius_tr", 0),
+                "radius_bl": t.get("radius_bl", 0),
+                "radius_br": t.get("radius_br", 0),
+                "layer_region": t.get("layer_region"),
+                "touch_left": tx == 0,
+                "touch_top": ty == 0,
+                "touch_right": tx + tw >= out_w,
+                "touch_bottom": ty + th >= out_h,
             })
             pbar.update_absolute(idx + 1, len(tiles))
 
