@@ -17,6 +17,13 @@ const GAP_SEARCH_BUDGET = 1200;
 
 const PREVIEW_MAX_EDGE = 2048; 
 const HIT = 8; // 显示空间命中容差（crop 式）
+
+/* ============ 倒角行为开关 ============ */
+const CORNER_RADIUS_SCALES_WITH_UPSCALE = true;  // true: 半径随 unified_upscale 缩放；false: 固定源像素
+const CORNER_INDEPENDENT = true;                 // true: 四角独立；false: 拖一角联锁四角
+const CORNER_HANDLE_HIT = 8;                     // 角柄命中半径（显示像素）
+const CORNER_MIN_HANDLE_PX = 4;                  // r=0 时手柄最小视觉偏移
+
 const ETS_UPSTREAM = new Set();
 const PALETTE = [
   "#ff4d4d", "#ff9a3d", "#ffd93d", "#b8e63d", "#4ade80", "#2dd4bf", "#38bdf8", "#5b8cff",
@@ -29,6 +36,25 @@ const snap = (v, d) => Math.round(v / d) * d;
 const snapCeil = (v, d) => Math.max(d, Math.ceil(v / d - 1e-6) * d);
 const roundDiv = (v, d) => Math.max(d, Math.round(v / d) * d);
 function djb2(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); }
+
+function roundRectPath(ctx, x, y, w, h, rtl, rtr, rbl, rbr) {
+  const m = Math.min(w, h) / 2;
+  rtl = Math.min(Math.max(0, rtl), m);
+  rtr = Math.min(Math.max(0, rtr), m);
+  rbl = Math.min(Math.max(0, rbl), m);
+  rbr = Math.min(Math.max(0, rbr), m);
+  ctx.beginPath();
+  ctx.moveTo(x + rtl, y);
+  ctx.lineTo(x + w - rtr, y);
+  if (rtr > 0) ctx.arcTo(x + w, y, x + w, y + rtr, rtr); else ctx.lineTo(x + w, y);
+  ctx.lineTo(x + w, y + h - rbr);
+  if (rbr > 0) ctx.arcTo(x + w, y + h, x + w - rbr, y + h, rbr); else ctx.lineTo(x + w, y + h);
+  ctx.lineTo(x + rbl, y + h);
+  if (rbl > 0) ctx.arcTo(x, y + h, x, y + h - rbl, rbl); else ctx.lineTo(x, y + h);
+  ctx.lineTo(x, y + rtl);
+  if (rtl > 0) ctx.arcTo(x, y, x + rtl, y, rtl); else ctx.lineTo(x, y);
+  ctx.closePath();
+}
 function hexA(hex, a) {
   const h = String(hex).replace("#", "");
   const n = parseInt(h.length === 3 ? h.split("").map(c => c + c).join("") : h, 16) || 0;
@@ -173,17 +199,54 @@ function rectSubtract(a, b) {
   return out;
 }
 
+function getInsetRect(R) {
+  let rx, ry, rw, rh, rtl = 0, rtr = 0, rbl = 0, rbr = 0;
+  if (R && !Array.isArray(R)) {
+    rx = R.x; ry = R.y; rw = R.w; rh = R.h;
+    rtl = R.rtl || 0; rtr = R.rtr || 0; rbl = R.rbl || 0; rbr = R.rbr || 0;
+  } else {
+    rx = R[0]; ry = R[1]; rw = R[2]; rh = R[3];
+  }
+  // 计算内缩后的宽高，向内退让至圆点切线（紫线）
+  const w = rw - rtl - rtr;
+  const h = rh - rtl - rbr;
+  if (w > 0 && h > 0) {
+    return [rx + rtl, ry + rtl, w, h];
+  }
+  return [rx, ry, rw, rh];
+}
+
 function edgeFullyCovered(B, R) {
   const [bx, by, bw, bh] = B;
-  const [rx, ry, rw, rh] = R;
+  let rx, ry, rw, rh;
+  if (R && !Array.isArray(R)) {
+    rx = R.x; ry = R.y; rw = R.w; rh = R.h;
+  } else {
+    rx = R[0]; ry = R[1]; rw = R[2]; rh = R[3];
+  }
+
   const ix1 = Math.max(bx, rx), iy1 = Math.max(by, ry);
   const ix2 = Math.min(bx + bw, rx + rw), iy2 = Math.min(by + bh, ry + rh);
   if (ix1 >= ix2 || iy1 >= iy2) return false;
 
-  if (rx <= bx && rx + rw >= bx + bw && ry <= by && ry + rh > by) return true;
-  if (rx <= bx && rx + rw >= bx + bw && ry < by + bh && ry + rh >= by + bh) return true;
-  if (ry <= by && ry + rh >= by + bh && rx <= bx && rx + rw > bx) return true;
-  if (ry <= by && ry + rh >= by + bh && rx < bx + bw && rx + rw >= bx + bw) return true;
+  // 改为只判断包围盒，不再受圆角影响，允许切断圆弧外侧的边
+  const _inside = (px, py) => {
+    return px >= rx - 1e-6 && px <= rx + rw + 1e-6 &&
+           py >= ry - 1e-6 && py <= ry + rh + 1e-6;
+  };
+
+  if (rx <= bx && rx + rw >= bx + bw && ry <= by && ry + rh > by) {
+    if (_inside(bx, by) && _inside(bx + bw, by)) return true;
+  }
+  if (rx <= bx && rx + rw >= bx + bw && ry < by + bh && ry + rh >= by + bh) {
+    if (_inside(bx, by + bh) && _inside(bx + bw, by + bh)) return true;
+  }
+  if (ry <= by && ry + rh >= by + bh && rx <= bx && rx + rw > bx) {
+    if (_inside(bx, by) && _inside(bx, by + bh)) return true;
+  }
+  if (ry <= by && ry + rh >= by + bh && rx < bx + bw && rx + rw >= bx + bw) {
+    if (_inside(bx + bw, by) && _inside(bx + bw, by + bh)) return true;
+  }
   return false;
 }
 
@@ -196,11 +259,12 @@ function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = 
   for (const b of baseGrid) {
     let parts = [[b.x, b.y, b.w, b.h]];
     for (const rg of regions) {
-      const rr = [rg.x, rg.y, rg.w, rg.h];
       const nxt = [];
       for (const p of parts) {
-        if (edgeFullyCovered(p, rr)) {
-          nxt.push(...rectSubtract(p, rr));
+        // 判断用带圆角的原始 rg 对象
+        if (edgeFullyCovered(p, rg)) {
+          // 相减用内缩矩形，确保切割线落在紫线上
+          nxt.push(...rectSubtract(p, getInsetRect(rg)));
         } else {
           nxt.push(p);
         }
@@ -958,7 +1022,15 @@ class TileSplitUI {
     const ry = clamp(snap(l.y * up, div), 0, oh - div);
     const rw = (l.x + l.w >= this.srcW - 0.5) ? (ow - rx) : clamp(snap(l.w * up, div), div, ow - rx);
     const rh = (l.y + l.h >= this.srcH - 0.5) ? (oh - ry) : clamp(snap(l.h * up, div), div, oh - ry);
-    return { x: rx, y: ry, w: rw, h: rh };
+    
+    const scale_r = CORNER_RADIUS_SCALES_WITH_UPSCALE ? up : 1.0;
+    const half_lim = Math.max(1, Math.floor(Math.min(rw, rh) / 2));
+    const rtl = Math.min(Math.round((l.r_tl || 0) * scale_r), half_lim);
+    const rtr = Math.min(Math.round((l.r_tr || 0) * scale_r), half_lim);
+    const rbl = Math.min(Math.round((l.r_bl || 0) * scale_r), half_lim);
+    const rbr = Math.min(Math.round((l.r_br || 0) * scale_r), half_lim);
+
+    return { x: rx, y: ry, w: rw, h: rh, rtl, rtr, rbl, rbr };
   }
   unifiedTiles() {
     const s = this.state;
@@ -1058,20 +1130,41 @@ class TileSplitUI {
   }
   drawBox(ctx, l, i, k, sel) {
     const x = l.x * k, y = l.y * k, w = l.w * k, h = l.h * k;
+    const rtl = (l.r_tl | 0) * k, rtr = (l.r_tr | 0) * k;
+    const rbl = (l.r_bl | 0) * k, rbr = (l.r_br | 0) * k;
+
+    roundRectPath(ctx, x, y, w, h, rtl, rtr, rbl, rbr);
     ctx.fillStyle = hexA(l.color, .12);
-    ctx.fillRect(x, y, w, h);
+    ctx.fill();
     ctx.strokeStyle = l.color;
     ctx.lineWidth = sel ? 2.5 : 1.5;
-    ctx.strokeRect(x + .5, y + .5, w - 1, h - 1);
+    ctx.stroke();
+
     if (sel) {
-      const pts = [[x, y], [x + w / 2, y], [x + w, y], [x, y + h / 2], [x + w, y + h / 2], [x, y + h], [x + w / 2, y + h], [x + w, y + h]];
+      // 8 点缩放柄（原样）
+      const pts = [[x, y], [x + w / 2, y], [x + w, y], [x, y + h / 2],
+                   [x + w, y + h / 2], [x, y + h], [x + w / 2, y + h], [x + w, y + h]];
       for (const [px, py] of pts) {
         ctx.fillStyle = "#fff";
         ctx.fillRect(px - 3.5, py - 3.5, 7, 7);
         ctx.strokeStyle = l.color; ctx.lineWidth = 1.2;
         ctx.strokeRect(px - 3.5, py - 3.5, 7, 7);
       }
+      // 4 角倒角柄（圆点）
+      const t = (r) => Math.max(r, CORNER_MIN_HANDLE_PX);
+      const cpts = [
+        [x + t(rtl), y + t(rtl)],
+        [x + w - t(rtr), y + t(rtr)],
+        [x + t(rbl), y + h - t(rbl)],
+        [x + w - t(rbr), y + h - t(rbr)],
+      ];
+      for (const [px, py] of cpts) {
+        ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2);
+        ctx.fillStyle = "#43d9d1"; ctx.fill();
+        ctx.strokeStyle = "#0b1e24"; ctx.lineWidth = 1; ctx.stroke();
+      }
     }
+
     const s = 18, bx = x + 2, by = y + 2;
     ctx.fillStyle = l.color;
     ctx.fillRect(bx, by, s, s);
@@ -1112,6 +1205,23 @@ class TileSplitUI {
     if (nR) return "e";
     return "move";
   }
+
+  cornerHit(dp, l) {
+    const k = this.dispScale || 1;
+    const b = this.boxDisp(l);
+    const t = (r) => Math.max(r * k, CORNER_MIN_HANDLE_PX);
+    const pts = [
+      ["tl", b.x + t(l.r_tl), b.y + t(l.r_tl)],
+      ["tr", b.x + b.w - t(l.r_tr), b.y + t(l.r_tr)],
+      ["bl", b.x + t(l.r_bl), b.y + b.h - t(l.r_bl)],
+      ["br", b.x + b.w - t(l.r_br), b.y + b.h - t(l.r_br)],
+    ];
+    for (const [name, px, py] of pts) {
+      if (Math.hypot(dp[0] - px, dp[1] - py) <= CORNER_HANDLE_HIT) return name;
+    }
+    return null;
+  }
+
   hitAt(dp) {
     for (let i = this.state.layers.length - 1; i >= 0; i--) {
       const l = this.state.layers[i];
@@ -1133,6 +1243,18 @@ class TileSplitUI {
       this.cv.style.cursor = "crosshair";
       return;
     }
+	
+    // 选中层的角柄优先（不影响其它层的移动/缩放）
+    const selLayer = this.state.layers.find(x => x.id === this.state.selected);
+    if (selLayer) {
+      const corner = this.cornerHit(dp, selLayer);
+      if (corner) {
+        this.drag = { type: "corner", id: selLayer.id, corner };
+        this.cv.style.cursor = "crosshair";
+        return;
+      }
+    }
+	
     const hit = this.hitAt(dp);
     if (hit) {
       this.selectLayer(hit.layer.id, false);
@@ -1151,6 +1273,17 @@ class TileSplitUI {
     if (this.drag) return;
     const s = this.state;
     if (s.mode !== "manual" || !this._isActive() || !this.srcW || !this._lastDisp) return;
+	
+    const selLayer = s.layers.find(x => x.id === s.selected);
+    if (selLayer && this.cornerHit(this._lastDisp, selLayer)) {
+      if (this._lastCursor !== "crosshair") {
+        this._lastCursor = "crosshair";
+        this._lastHoverId = selLayer.id;
+        this.cv.style.cursor = "crosshair";
+      }
+      return;
+    }
+	
     const hit = forceCrosshair ? null : this.hitAt(this._lastDisp);
     const cur = !hit ? "crosshair" : (hit.handle === "move" ? "move" : CUR[hit.handle]);
     const hoverId = hit?.layer.id ?? null;
@@ -1187,6 +1320,24 @@ class TileSplitUI {
     // if (d.type === "new") { d.x1 = sx; d.y1 = sy; this.previewNewRect = { ...d }; this.draw(); return; }
     const l = s.layers.find(x => x.id === d.id);
     if (!l) return;
+	
+    if (d.type === "corner") {
+      const lim = Math.floor(Math.min(l.w, l.h) / 2);
+      let r;
+      if (d.corner === "tl") r = Math.max(sx - l.x, sy - l.y);
+      if (d.corner === "tr") r = Math.max((l.x + l.w) - sx, sy - l.y);
+      if (d.corner === "bl") r = Math.max(sx - l.x, (l.y + l.h) - sy);
+      if (d.corner === "br") r = Math.max((l.x + l.w) - sx, (l.y + l.h) - sy);
+      r = clamp(Math.round(r), 0, lim);
+      if (CORNER_INDEPENDENT) {
+        l["r_" + d.corner] = r;
+      } else {
+        l.r_tl = l.r_tr = l.r_bl = l.r_br = r;
+      }
+      this.draw();
+      return;
+    }
+	
     if (d.type === "move") {
       l.x = clamp(snap(d.orig.x + (sx - d.ox), div), 0, Math.max(0, this.srcW - l.w));
       l.y = clamp(snap(d.orig.y + (sy - d.oy), div), 0, Math.max(0, this.srcH - l.h));
@@ -1206,7 +1357,10 @@ class TileSplitUI {
     this.drag = null; this.previewNewRect = null;
     if (!d) return;
     if (d.type === "new") this.finalizeNew(d);
-    else {
+    else if (d.type === "corner") {
+      this.clampLayer(this.state.layers.find(x => x.id === d.id));
+      this.saveState(); this.render();
+    } else {
       this.clampLayer(this.state.layers.find(x => x.id === d.id));
       this.saveState(); this.render();
     }
@@ -1224,6 +1378,7 @@ class TileSplitUI {
     const layer = {
       id: Date.now() + Math.floor(Math.random() * 1000), color: this.nextColor(),
       x, y, w, h, upscale: this.state.unified.upscale, cols: 1, rows: 1, prompt: "", negative: "",
+	  r_tl: 0, r_tr: 0, r_bl: 0, r_br: 0,
     };
     this.state.layers.push(layer);
     this.state.selected = layer.id;
@@ -1240,6 +1395,11 @@ class TileSplitUI {
     const min = this.state.div * MIN_DIVS;
     l.w = clamp(l.w, min, this.srcW); l.h = clamp(l.h, min, this.srcH);
     l.x = clamp(l.x, 0, this.srcW - l.w); l.y = clamp(l.y, 0, this.srcH - l.h);
+    const lim = Math.floor(Math.min(l.w, l.h) / 2);
+    l.r_tl = clamp(l.r_tl | 0, 0, lim);
+    l.r_tr = clamp(l.r_tr | 0, 0, lim);
+    l.r_bl = clamp(l.r_bl | 0, 0, lim);
+    l.r_br = clamp(l.r_br | 0, 0, lim);
   }
   clampLayersToBounds() {
     if (!this.srcW) return;
