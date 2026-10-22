@@ -133,6 +133,7 @@ Pure geometric splitting + image source intake, no model dependency. At executio
 | `Ctrl + drag` | Create a new layer box (snapped to div). |
 | Drag inside a box | Move. |
 | Drag a box's 8 handles | Resize (8px hit tolerance). |
+| Drag the control points at the four corners of the box | Adjust the size of the rounded corners; each corner can be controlled independently. This does not affect the list of output tiled images, as the rounding is applied only within the Element Tile Merge node |
 | Click empty area | Deselect. |
 | `Delete / Backspace` | Delete currently selected layer. |
 | Drag image / Ctrl+V | Upload and replace source image. |
