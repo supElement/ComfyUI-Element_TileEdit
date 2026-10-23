@@ -101,32 +101,6 @@ function splitRegion(x, y, w, h, cols, rows, ov) {
     out.push({ x: x + tx, y: y + ty, w: tw, h: th, col: i, row: j })));
   return out;
 }
-function largestFreeRect(free) {
-  const rows = free.length, cols = free[0].length;
-  const heights = new Array(cols).fill(0);
-  let widest = null;   
-  
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) heights[c] = free[r][c] ? heights[c] + 1 : 0;
-    const stack = [];
-    for (let c = 0; c <= cols; c++) {
-      const hcur = c < cols ? heights[c] : 0;
-      let start = c;
-      while (stack.length && stack[stack.length - 1][1] >= hcur) {
-        const [s, hgt] = stack.pop();
-        const area = hgt * (c - s);
-        if (area > 0) {
-          if (!widest || area > widest[0]) widest = [area, r - hgt + 1, s, hgt, c - s];
-        }
-        start = s;
-      }
-      stack.push([start, hcur]);
-    }
-  }
-  return widest && widest[0] > 0 ? widest : null;
-}
-
-function snapV(v, s) { return Math.round(v / s) * s; }
 
 function balancedSubsplit(rects, gapMax) {
   const out = [];
@@ -144,111 +118,285 @@ function balancedSubsplit(rects, gapMax) {
     }
     const [, sc, sr] = best || [0, maxSc, maxSr];
     const sw = Math.ceil(rw / sc), sh = Math.ceil(rh / sr);
-    for (let i = 0; i < sc; i++) for (let j = 0; j < sr; j++) {
-      const x = rx + i * sw, y = ry + j * sh;
-      out.push({ x, y, w: Math.min(sw, rx + rw - x), h: Math.min(sh, ry + rh - y) });
-    }
-  }
-  return out;
-}
-
-function mergeAdjacent(rects, gapMax, minShort, aspect = GAP_MAX_ASPECT) {
-  const rs = rects.map(r => r.slice());
-  let changed = true;
-  while (changed) {
-    changed = false;
-    outer:
-    for (let i = 0; i < rs.length; i++) {
-      for (let j = i + 1; j < rs.length; j++) {
-        const a = rs[i], b = rs[j];
-        let m = null;
-        if (a[1] === b[1] && a[3] === b[3] && (a[0] + a[2] === b[0] || b[0] + b[2] === a[0]))
-          m = [Math.min(a[0], b[0]), a[1], a[2] + b[2], a[3]];
-        else if (a[0] === b[0] && a[2] === b[2] && (a[1] + a[3] === b[1] || b[1] + b[3] === a[1]))
-          m = [a[0], Math.min(a[1], b[1]), a[2], a[3] + b[3]];
-        if (!m) continue;
-        if (m[2] > gapMax || m[3] > gapMax ||
-            Math.max(m[2], m[3]) / Math.max(1, Math.min(m[2], m[3])) > aspect ||
-            Math.min(m[2], m[3]) < minShort) continue;
-        rs[i] = m; rs.splice(j, 1); changed = true;
-        break outer;
+    for (let i = 0; i < sc; i++) {
+      const x0 = rx + Math.round(i * rw / sc);
+      const x1 = rx + Math.round((i + 1) * rw / sc);
+      for (let j = 0; j < sr; j++) {
+        const y0 = ry + Math.round(j * rh / sr);
+        const y1 = ry + Math.round((j + 1) * rh / sr);
+        out.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
       }
     }
   }
-  return rs;
-}
-
-function rectOverlap(a, b) {
-  const w = Math.max(0, Math.min(a[0] + a[2], b[0] + b[2]) - Math.max(a[0], b[0]));
-  const h = Math.max(0, Math.min(a[1] + a[3], b[1] + b[3]) - Math.max(a[1], b[1]));
-  return w * h;
-}
-
-function rectSubtract(a, b) {
-  const [ax, ay, aw, ah] = a;
-  const [bx, by, bw, bh] = b;
-  const ix1 = Math.max(ax, bx), iy1 = Math.max(ay, by);
-  const ix2 = Math.min(ax + aw, bx + bw), iy2 = Math.min(ay + ah, by + bh);
-  if (ix1 >= ix2 || iy1 >= iy2) return [a];
-  if (ix1 <= ax && iy1 <= ay && ix2 >= ax + aw && iy2 >= ay + ah) return [];
-  const out = [];
-  if (iy1 > ay) out.push([ax, ay, aw, iy1 - ay]);
-  if (iy2 < ay + ah) out.push([ax, iy2, aw, ay + ah - iy2]);
-  if (ix1 > ax) out.push([ax, iy1, ix1 - ax, iy2 - iy1]);
-  if (ix2 < ax + aw) out.push([ix2, iy1, ax + aw - ix2, iy2 - iy1]);
   return out;
 }
 
-function getInsetRect(R) {
-  let rx, ry, rw, rh, rtl = 0, rtr = 0, rbl = 0, rbr = 0;
-  if (R && !Array.isArray(R)) {
-    rx = R.x; ry = R.y; rw = R.w; rh = R.h;
-    rtl = R.rtl || 0; rtr = R.rtr || 0; rbl = R.rbl || 0; rbr = R.rbr || 0;
-  } else {
-    rx = R[0]; ry = R[1]; rw = R[2]; rh = R[3];
+/* 点是否在圆角矩形 R 内（R 为对象：{x,y,w,h,rtl,rtr,rbl,rbr}）
+   eps 为边界容差，默认 1e-6，与原 _inside 行为一致 */
+function ptInRoundedRect(x, y, R, eps = 1e-6) {
+  const rx = R.x, ry = R.y, rw = R.w, rh = R.h;
+  const rtl = R.rtl || 0, rtr = R.rtr || 0, rbl = R.rbl || 0, rbr = R.rbr || 0;
+
+  // 包围盒快速排除
+  if (x < rx - eps || x > rx + rw + eps) return false;
+  if (y < ry - eps || y > ry + rh + eps) return false;
+
+  // 四个圆角：落在对应角的正方形区域内时，用圆的方程判定
+  if (rtl > 0 && x < rx + rtl && y < ry + rtl) {
+    const dx = x - (rx + rtl), dy = y - (ry + rtl);
+    return dx * dx + dy * dy <= rtl * rtl + eps;
   }
-  // 计算内缩后的宽高，向内退让至圆点切线（紫线）
-  const w = rw - rtl - rtr;
-  const h = rh - rtl - rbr;
-  if (w > 0 && h > 0) {
-    return [rx + rtl, ry + rtl, w, h];
+  if (rtr > 0 && x > rx + rw - rtr && y < ry + rtr) {
+    const dx = x - (rx + rw - rtr), dy = y - (ry + rtr);
+    return dx * dx + dy * dy <= rtr * rtr + eps;
   }
-  return [rx, ry, rw, rh];
+  if (rbl > 0 && x < rx + rbl && y > ry + rh - rbl) {
+    const dx = x - (rx + rbl), dy = y - (ry + rh - rbl);
+    return dx * dx + dy * dy <= rbl * rbl + eps;
+  }
+  if (rbr > 0 && x > rx + rw - rbr && y > ry + rh - rbr) {
+    const dx = x - (rx + rw - rbr), dy = y - (ry + rh - rbr);
+    return dx * dx + dy * dy <= rbr * rbr + eps;
+  }
+  return true; // 不在任何角的圆角方块内，则在矩形实体区
 }
 
-function edgeFullyCovered(B, R) {
-  const [bx, by, bw, bh] = B;
-  let rx, ry, rw, rh;
-  if (R && !Array.isArray(R)) {
-    rx = R.x; ry = R.y; rw = R.w; rh = R.h;
-  } else {
-    rx = R[0]; ry = R[1]; rw = R[2]; rh = R[3];
-  }
-
-  const ix1 = Math.max(bx, rx), iy1 = Math.max(by, ry);
-  const ix2 = Math.min(bx + bw, rx + rw), iy2 = Math.min(by + bh, ry + rh);
-  if (ix1 >= ix2 || iy1 >= iy2) return false;
-
-  // 改为只判断包围盒，不再受圆角影响，允许切断圆弧外侧的边
-  const _inside = (px, py) => {
-    return px >= rx - 1e-6 && px <= rx + rw + 1e-6 &&
-           py >= ry - 1e-6 && py <= ry + rh + 1e-6;
+// A 的实际形状（圆角矩形）是否与矩形 rect=[x,y,w,h] 有正面积交集（精确版）
+function rectIntersectsRoundedRect(rect, R) {
+  const [rx, ry, rw, rh] = rect;
+  const rx2 = rx + rw, ry2 = ry + rh;
+  
+  // 1. 包围盒快速排除
+  if (rx2 <= R.x || rx >= R.x + R.w || ry2 <= R.y || ry >= R.y + R.h) return false;
+  
+  const rtl = R.rtl || 0, rtr = R.rtr || 0, rbl = R.rbl || 0, rbr = R.rbr || 0;
+  
+  // 2. 判断 rect 是否与 R 的“中心十字区域”相交
+  const cx0 = R.x + Math.max(rtl, rbl);
+  const cx1 = R.x + R.w - Math.max(rtr, rbr);
+  const cy0 = R.y + Math.max(rtl, rtr);
+  const cy1 = R.y + R.h - Math.max(rbl, rbr);
+  
+  if (rx < cx1 && rx2 > cx0 && ry < cy1 && ry2 > cy0) return true;
+  
+  // 3. 判断 rect 是否与四个圆角（四分之一圆盘）相交
+  const circleIntersects = (cx, cy, r) => {
+      const nx = Math.max(rx, Math.min(cx, rx2));
+      const ny = Math.max(ry, Math.min(cy, ry2));
+      return (nx - cx) ** 2 + (ny - cy) ** 2 < r * r; // 严格小于，允许相切
   };
 
-  if (rx <= bx && rx + rw >= bx + bw && ry <= by && ry + rh > by) {
-    if (_inside(bx, by) && _inside(bx + bw, by)) return true;
+  if (rtl > 0) {
+      const cx = R.x + rtl, cy = R.y + rtl;
+      const nx = Math.max(rx, Math.min(cx, rx2));
+      const ny = Math.max(ry, Math.min(cy, ry2));
+      if (nx <= cx && ny <= cy && circleIntersects(cx, cy, rtl)) return true;
   }
-  if (rx <= bx && rx + rw >= bx + bw && ry < by + bh && ry + rh >= by + bh) {
-    if (_inside(bx, by + bh) && _inside(bx + bw, by + bh)) return true;
+  if (rtr > 0) {
+      const cx = R.x + R.w - rtr, cy = R.y + rtr;
+      const nx = Math.max(rx, Math.min(cx, rx2));
+      const ny = Math.max(ry, Math.min(cy, ry2));
+      if (nx >= cx && ny <= cy && circleIntersects(cx, cy, rtr)) return true;
   }
-  if (ry <= by && ry + rh >= by + bh && rx <= bx && rx + rw > bx) {
-    if (_inside(bx, by) && _inside(bx, by + bh)) return true;
+  if (rbl > 0) {
+      const cx = R.x + rbl, cy = R.y + R.h - rbl;
+      const nx = Math.max(rx, Math.min(cx, rx2));
+      const ny = Math.max(ry, Math.min(cy, ry2));
+      if (nx <= cx && ny >= cy && circleIntersects(cx, cy, rbl)) return true;
   }
-  if (ry <= by && ry + rh >= by + bh && rx < bx + bw && rx + rw >= bx + bw) {
-    if (_inside(bx + bw, by) && _inside(bx + bw, by + bh)) return true;
+  if (rbr > 0) {
+      const cx = R.x + R.w - rbr, cy = R.y + R.h - rbr;
+      const nx = Math.max(rx, Math.min(cx, rx2));
+      const ny = Math.max(ry, Math.min(cy, ry2));
+      if (nx >= cx && ny >= cy && circleIntersects(cx, cy, rbr)) return true;
   }
   return false;
 }
+
+/* 安全探测扩张：返回在 dir 方向上最多能扩张的安全距离（不碰到任何 A） */
+function getSafeExpand(rect, dir, maxDist, regions) {
+    const [x, y, w, h] = rect;
+    let safe = 0;
+    const step = 4; // 先以 4 像素步长快速探测
+    while (safe < maxDist) {
+        let d = Math.min(maxDist - safe, step);
+        let testRect;
+        if (dir === 'top') testRect = [x, y - safe - d, w, d];
+        else if (dir === 'bottom') testRect = [x, y + h + safe, w, d];
+        else if (dir === 'left') testRect = [x - safe - d, y, d, h];
+        else if (dir === 'right') testRect = [x + w + safe, y, d, h];
+        
+        let hit = false;
+        for (const rg of regions) {
+            if (rectIntersectsRoundedRect(testRect, rg)) { hit = true; break; }
+        }
+        if (hit) {
+            if (d > 1) {
+                d = 1;
+                if (dir === 'top') testRect = [x, y - safe - 1, w, 1];
+                else if (dir === 'bottom') testRect = [x, y + h + safe, w, 1];
+                else if (dir === 'left') testRect = [x - safe - 1, y, 1, h];
+                else if (dir === 'right') testRect = [x + w + safe, y, 1, h];
+                
+                let hit1 = false;
+                for (const rg of regions) {
+                    if (rectIntersectsRoundedRect(testRect, rg)) { hit1 = true; break; }
+                }
+                if (hit1) break;
+                safe += 1;
+                continue;
+            }
+            break;
+        }
+        safe += d;
+    }
+    return safe;
+}
+
+
+/* ---------- 新增：圆弧求交与单刀精确切割 ---------- */
+function getTopY(lx, R) {
+  const rx = R.x, ry = R.y, rw = R.w, rh = R.h;
+  const rtl = R.rtl || 0, rtr = R.rtr || 0;
+  if (lx < rx) return ry;
+  if (lx > rx + rw) return ry;
+  if (lx < rx + rtl) {
+    const cx = rx + rtl, cy = ry + rtl;
+    const dx = cx - lx;
+    return cy - Math.sqrt(Math.max(0, rtl * rtl - dx * dx));
+  }
+  if (lx > rx + rw - rtr) {
+    const cx = rx + rw - rtr, cy = ry + rtr;
+    const dx = lx - cx;
+    return cy - Math.sqrt(Math.max(0, rtr * rtr - dx * dx));
+  }
+  return ry;
+}
+function getBottomY(lx, R) {
+  const rx = R.x, ry = R.y, rw = R.w, rh = R.h;
+  const rbl = R.rbl || 0, rbr = R.rbr || 0;
+  if (lx < rx) return ry + rh;
+  if (lx > rx + rw) return ry + rh;
+  if (lx < rx + rbl) {
+    const cx = rx + rbl, cy = ry + rh - rbl;
+    const dx = cx - lx;
+    return cy + Math.sqrt(Math.max(0, rbl * rbl - dx * dx));
+  }
+  if (lx > rx + rw - rbr) {
+    const cx = rx + rw - rbr, cy = ry + rh - rbr;
+    const dx = lx - cx;
+    return cy + Math.sqrt(Math.max(0, rbr * rbr - dx * dx));
+  }
+  return ry + rh;
+}
+function getLeftX(ly, R) {
+  const rx = R.x, ry = R.y, rw = R.w, rh = R.h;
+  const rtl = R.rtl || 0, rbl = R.rbl || 0;
+  if (ly < ry) return rx;
+  if (ly > ry + rh) return rx;
+  if (ly < ry + rtl) {
+    const cx = rx + rtl, cy = ry + rtl;
+    const dy = cy - ly;
+    return cx - Math.sqrt(Math.max(0, rtl * rtl - dy * dy));
+  }
+  if (ly > ry + rh - rbl) {
+    const cx = rx + rbl, cy = ry + rh - rbl;
+    const dy = ly - cy;
+    return cx - Math.sqrt(Math.max(0, rbl * rbl - dy * dy));
+  }
+  return rx;
+}
+function getRightX(ly, R) {
+  const rx = R.x, ry = R.y, rw = R.w, rh = R.h;
+  const rtr = R.rtr || 0, rbr = R.rbr || 0;
+  if (ly < ry) return rx + rw;
+  if (ly > ry + rh) return rx + rw;
+  if (ly < ry + rtr) {
+    const cx = rx + rw - rtr, cy = ry + rtr;
+    const dy = cy - ly;
+    return cx + Math.sqrt(Math.max(0, rtr * rtr - dy * dy));
+  }
+  if (ly > ry + rh - rbr) {
+    const cx = rx + rw - rbr, cy = ry + rh - rbr;
+    const dy = ly - cy;
+    return cx + Math.sqrt(Math.max(0, rbr * rbr - dy * dy));
+  }
+  return rx + rw;
+}
+
+function subtractSingleCut(p, R) {
+  const [px, py, pw, ph] = p;
+  const pb = py + ph, pr = px + pw;
+
+  const ox = Math.max(px, R.x);
+  const oy = Math.max(py, R.y);
+  const ox2 = Math.min(pr, R.x + R.w);
+  const oy2 = Math.min(pb, R.y + R.h);
+  if (ox >= ox2 || oy >= oy2) return p; // 无交集
+
+  const rtl = R.rtl || 0, rtr = R.rtr || 0, rbl = R.rbl || 0, rbr = R.rbr || 0;
+  const _inside = (x, y) => {
+    if (x < R.x - 1e-6 || x > R.x + R.w + 1e-6) return false;
+    if (y < R.y - 1e-6 || y > R.y + R.h + 1e-6) return false;
+    if (rtl > 0 && x < R.x + rtl && y < R.y + rtl) return (x-(R.x+rtl))**2 + (y-(R.y+rtl))**2 <= rtl*rtl + 1e-4;
+    if (rtr > 0 && x > R.x + R.w - rtr && y < R.y + rtr) return (x-(R.x+R.w-rtr))**2 + (y-(R.y+rtr))**2 <= rtr*rtr + 1e-4;
+    if (rbl > 0 && x < R.x + rbl && y > R.y + R.h - rbl) return (x-(R.x+rbl))**2 + (y-(R.y+R.h-rbl))**2 <= rbl*rbl + 1e-4;
+    if (rbr > 0 && x > R.x + R.w - rbr && y > R.y + R.h - rbr) return (x-(R.x+R.w-rbr))**2 + (y-(R.y+R.h-rbr))**2 <= rbr*rbr + 1e-4;
+    return true;
+  };
+
+  // 完全包含：A 是凸的圆角矩形，矩形 B 四角均在 A 内 ⇔ B ⊆ A
+  if (_inside(px, py) && _inside(pr, py) && _inside(px, pb) && _inside(pr, pb)) return null;
+
+  const covTop = (R.x <= px && R.x + R.w >= pr && R.y <= py && R.y + R.h > py) && _inside(px, py) && _inside(pr, py);
+  const covBottom = (R.x <= px && R.x + R.w >= pr && R.y < pb && R.y + R.h >= pb) && _inside(px, pb) && _inside(pr, pb);
+  const covLeft = (R.y <= py && R.y + R.h >= pb && R.x <= px && R.x + R.w > px) && _inside(px, py) && _inside(px, pb);
+  const covRight = (R.y <= py && R.y + R.h >= pb && R.x < pr && R.x + R.w >= pr) && _inside(pr, py) && _inside(pr, pb);
+
+  if (!covTop && !covBottom && !covLeft && !covRight) return p;
+
+  let bestArea = Infinity;
+  let bestType = null;
+  let bestCut = 0;
+
+  // 修正极值：切入 A 的内部，确保倒角外侧没有未覆盖的空洞
+  if (covTop) { // 保留下方，切在上方最深处
+    let cutY = Math.min(getBottomY(px, R), getBottomY(pr, R)); 
+    cutY = Math.max(py, Math.min(pb, cutY));
+    let area = pw * (pb - cutY);
+    if (area >= 0 && area < bestArea) { bestArea = area; bestType = 'top'; bestCut = cutY; }
+  }
+  if (covBottom) { // 保留上方，切在下方最深处
+    let cutY = Math.max(getTopY(px, R), getTopY(pr, R)); 
+    cutY = Math.max(py, Math.min(pb, cutY));
+    let area = pw * (cutY - py);
+    if (area >= 0 && area < bestArea) { bestArea = area; bestType = 'bottom'; bestCut = cutY; }
+  }
+  if (covLeft) { // 保留右侧，切在左侧最深处
+    let cutX = Math.min(getRightX(py, R), getRightX(pb, R)); 
+    cutX = Math.max(px, Math.min(pr, cutX));
+    let area = ph * (pr - cutX);
+    if (area >= 0 && area < bestArea) { bestArea = area; bestType = 'left'; bestCut = cutX; }
+  }
+  if (covRight) { // 保留左侧，切在右侧最深处
+    let cutX = Math.max(getLeftX(py, R), getLeftX(pb, R)); 
+    cutX = Math.max(px, Math.min(pr, cutX));
+    let area = ph * (cutX - px);
+    if (area >= 0 && area < bestArea) { bestArea = area; bestType = 'right'; bestCut = cutX; }
+  }
+
+  if (bestType === null) return p;
+
+  let nx = px, ny = py, nw = pw, nh = ph;
+  if (bestType === 'top') { ny = bestCut; nh = pb - bestCut; }
+  else if (bestType === 'bottom') { ny = py; nh = bestCut - py; }
+  else if (bestType === 'left') { nx = bestCut; nw = pr - bestCut; }
+  else if (bestType === 'right') { nx = px; nw = bestCut - px; }
+
+  if (nw <= 0 || nh <= 0) return null;
+  return [nx, ny, nw, nh];
+}
+
 
 function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = GAP_TARGET_TILES) {
   if (!regions.length) return balancedSubsplit([{ x: 0, y: 0, w: outW, h: outH }], gapMax);
@@ -261,13 +409,8 @@ function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = 
     for (const rg of regions) {
       const nxt = [];
       for (const p of parts) {
-        // 判断用带圆角的原始 rg 对象
-        if (edgeFullyCovered(p, rg)) {
-          // 相减用内缩矩形，确保切割线落在紫线上
-          nxt.push(...rectSubtract(p, getInsetRect(rg)));
-        } else {
-          nxt.push(p);
-        }
+        const res = subtractSingleCut(p, rg);
+        if (res) nxt.push(res);
       }
       parts = nxt;
       if (!parts.length) break;
@@ -275,55 +418,98 @@ function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = 
     pieces.push(...parts);
   }
 
+  // 【严格遵守】只有相切边宽度完全一致，且贴合的块才允许合并
+  const canMerge = (A, B) => {
+    const eps = 5.0; // 放宽到 5px 的误差，防止浮点数和取整误差导致漏判
+    const [x, y, w, h] = A;
+    const [qx, qy, qw, qh] = B;
+    
+    // 1. 纵向相切（上下相邻）：x 坐标对齐，宽度相同，且上下边贴合
+    const vertAlign = Math.abs(x - qx) <= eps && Math.abs(w - qw) <= eps;
+    const vertTouch = Math.abs((y + h) - qy) <= eps || Math.abs((qy + qh) - y) <= eps;
+    if (vertAlign && vertTouch) return true;
+    
+    // 2. 横向相切（左右相邻）：y 坐标对齐，高度相同，且左右边贴合
+    const horzAlign = Math.abs(y - qy) <= eps && Math.abs(h - qh) <= eps;
+    const horzTouch = Math.abs((x + w) - qx) <= eps || Math.abs((qx + qw) - x) <= eps;
+    if (horzAlign && horzTouch) return true;
+    
+    return false;
+  };
+
   let changed = true;
-  while (changed) {
+  let iter = 0;
+  while (changed && iter < 60) {
     changed = false;
+    iter++;
+    pieces.sort((a, b) => (b[2] * b[3]) - (a[2] * a[3])); // 大块优先
+
     for (let i = 0; i < pieces.length; i++) {
       if (!pieces[i]) continue;
-      let [x, y, w, h] = pieces[i];
-      if (Math.max(w, h) / Math.max(1, Math.min(w, h)) <= 5.0) continue;
+      const [x, y, w, h] = pieces[i];
 
-      const ox = x, oy = y, ow = w, oh = h;
-      if (w > h) {
-        const diff = w / 5.0 - h;
-        let expandT = Math.min(y, diff / 2);
-        let expandB = diff - expandT;
-        if (expandB > outH - (y + h)) {
-          expandB = outH - (y + h);
-          expandT = diff - expandB;
-        }
-        y = Math.max(0, Math.floor(y - expandT));
-        h = Math.min(outH - y, Math.ceil(h + diff));
-      } else {
-        const diff = h / 5.0 - w;
-        let expandL = Math.min(x, diff / 2);
-        let expandR = diff - expandL;
-        if (expandR > outW - (x + w)) {
-          expandR = outW - (x + w);
-          expandL = diff - expandR;
-        }
-        x = Math.max(0, Math.floor(x - expandL));
-        w = Math.min(outW - x, Math.ceil(w + diff));
-      }
-
-      let nx = x, ny = y, nw = w, nh = h;
+      // ---- 1. 收集所有可合并邻居，挑面积最小的吞（碎块优先消失） ----
+      let bestJ = -1, bestArea = Infinity;
       for (let j = 0; j < pieces.length; j++) {
         if (i === j || !pieces[j]) continue;
-        const [qx, qy, qw, qh] = pieces[j];
-        const ix = Math.max(nx, qx), iy = Math.max(ny, qy);
-        const ix2 = Math.min(nx + nw, qx + qw), iy2 = Math.min(ny + nh, qy + qh);
-        if (ix < ix2 && iy < iy2) {
-          const nx2 = Math.min(nx, qx), ny2 = Math.min(ny, qy);
-          nx = nx2; ny = ny2;
-          nw = Math.max(nx + nw, qx + qw) - nx;
-          nh = Math.max(ny + nh, qy + qh) - ny;
-          pieces[j] = null; 
-        }
+        if (!canMerge([x, y, w, h], pieces[j])) continue;
+        const a = pieces[j][2] * pieces[j][3];
+        if (a < bestArea) { bestArea = a; bestJ = j; }
       }
-      
-      if (nx !== ox || ny !== oy || nw !== ow || nh !== oh) {
-        pieces[i] = [nx, ny, nw, nh];
+
+      if (bestJ >= 0) {
+        const [qx, qy, qw, qh] = pieces[bestJ];
+        const nx = Math.min(x, qx), ny = Math.min(y, qy);
+        const nxEnd = Math.max(x + w, qx + qw);
+        const nyEnd = Math.max(y + h, qy + qh);
+        pieces[i] = [nx, ny, nxEnd - nx, nyEnd - ny];
+        pieces[bestJ] = null;
         changed = true;
+        break; // 重新排序、重新扫描（避免累积尺寸问题）
+      }
+
+      // ---- 2. 没邻居可吞，且自己细长时，向外部变胖 ----
+      if (Math.max(w, h) / Math.max(1, Math.min(w, h)) > 5.0) {
+        let targetW = w, targetH = h;
+        if (w > h) targetH = Math.ceil(w / 5.0);
+        else       targetW = Math.ceil(h / 5.0);
+
+        let bx = x, by = y, bw = w, bh = h;
+
+        if (targetH > h) {
+          const diff  = targetH - h;
+          const safeT = getSafeExpand([x, y, w, h], 'top', Math.min(diff, y), regions);
+          const safeB = getSafeExpand([x, y - safeT, w, h + safeT], 'bottom',
+                                      Math.min(diff - safeT, outH - (y + h)), regions);
+          by = y - safeT;
+          bh = h + safeT + safeB;
+        }
+
+        if (targetW > w) {
+          const diff  = targetW - w;
+          // ★ 用已经变过胖的 [bx,by,bw,bh]，而不是旧 x,y,w,h
+          const safeL = getSafeExpand([bx, by, bw, bh], 'left',
+                                      Math.min(diff, bx), regions);
+          const safeR = getSafeExpand([bx - safeL, by, bw + safeL, bh], 'right',
+                                      Math.min(diff - safeL, outW - (bx + bw)), regions);
+          bx = bx - safeL;
+          bw = bw + safeL + safeR;
+        }
+
+        let overlapsNeighbor = false;
+        for (let j = 0; j < pieces.length; j++) {
+          if (i === j || !pieces[j]) continue;
+          const [qx, qy, qw, qh] = pieces[j];
+          const ix  = Math.max(bx, qx),      iy  = Math.max(by, qy);
+          const ix2 = Math.min(bx + bw, qx + qw), iy2 = Math.min(by + bh, qy + qh);
+          if (ix < ix2 - 0.1 && iy < iy2 - 0.1) { overlapsNeighbor = true; break; }
+        }
+
+        if (!overlapsNeighbor && (bx !== x || by !== y || bw !== w || bh !== h)) {
+          pieces[i] = [bx, by, bw, bh];
+          changed = true;
+          break;
+        }
       }
     }
     if (changed) pieces = pieces.filter(p => p !== null);
@@ -339,22 +525,9 @@ function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = 
     }
   }
 
-  const cleanPieces = [];
-  for (const p of finalPieces) {
-    let parts = [p];
-    for (const c of cleanPieces) {
-      const nxt = [];
-      for (const pt of parts) {
-        nxt.push(...rectSubtract(pt, c));
-      }
-      parts = nxt;
-      if (!parts.length) break;
-    }
-    cleanPieces.push(...parts);
-  }
-
-  return cleanPieces.map(([x, y, w, h]) => ({ x, y, w, h }));
+  return finalPieces.map(([x, y, w, h]) => ({ x, y, w, h }));
 }
+
 
 
 /* ---------- 样式 ---------- */
