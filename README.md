@@ -8,9 +8,18 @@
 # ComfyUI-Element_TileEdit
   <sub> 原名：ComfyUI-Element_TileUpscale </sub>
 
-专为图像编辑模型设计的分块精修 / 编辑 / 放大的comfyUI扩展。它让 Qwen-Image 2.1 / Edit 2509 / 2511、FLUX.3/FLUX.2 klein、Krea2 这类模型在分块放大时，以 分块参考 ≫ 频率分离融合 > 邻居上下文 三层机制共同保证跨块一致性，denoise 重绘强度可以放心开到 0.7–1.0，同时保持原图的身份、结构与纹理一致；每采样步参考强度可以自定义，控制修复强度与一致性的平衡；延续部分图像编辑模型的能力（仅限单图）。这是传统 img2img 分块放大做不到的。用空间分块替代 Mask，实现多区域、多指令的图像编辑。手动分割模式（by Manual） 提供了真正的“分块级语义隔离”与像素级控制力，例如：你可以精准地把分块指定到“白衬衫”上，并且只在对应 Layer 的 Prompt 里写“改成蓝衬衫”。同时，未被框选的背景、头发、桌子会被自动划入 Gap fill（补块） 区域，它们不接收改衬衫的指令（或仅接收基础的全局画质增强指令），从而完美保持原状。此外，每个手动分割的图层还可以独立设置放大尺寸，让你在编辑或重绘核心区域时，拥有更高的分辨率与细节表现。手动分割（CTRL + 左键拖动添加分块）。
+专为图像编辑模型设计的分块精修 / 编辑 / 放大 ComfyUI 扩展（仅限单图），提供强大的分块控制与局部精修能力。
+支持模型：Qwen-Image 2.1 / Edit 2509 / 2511、FLUX.3 / FLUX.2 klein、Krea2 + lora。
 
-- Krea2 需要 [krea2_identity_edit](https://huggingface.co/conradlocke/krea2-identity-edit/tree/main) lora。
+✨ 分块放大：告别传统 img2img 的跨块撕裂
+以「分块参考 ≫ 频率分离融合 > 邻居上下文」三层机制共同保证跨块一致性。你可以放心将 Denoise 重绘强度拉高至 0.7–1.0，同时完美保持原图的人物身份、结构与纹理细节。支持自定义每采样步的参考强度，精准平衡“修复强度”与“一致性”，这是传统 img2img 分块放大无法做到的。
+
+✨ 分块控制与局部精修：用空间分块替代 Mask
+手动分割模式（by Manual）提供了真正的“分块级语义隔离”与像素级控制力。例如：你可以精准框选“白衬衫”所在的图层，并在对应 Layer 的 Prompt 中仅输入“改成蓝衬衫”。未被框选的背景、头发、桌子等会自动划入 Gap fill（补块） 区域，不接收该指令（或仅接收基础的全局画质增强指令），从而完美保持原状。
+操作方式：CTRL + 左键拖动 添加分块。
+独立放大：每个手动分割的图层均可单独设置放大尺寸，让核心编辑区域获得更高的分辨率与细节表现。
+
+- ⚠️ 使用 Krea2 模型需要搭配 [krea2_identity_edit](https://huggingface.co/conradlocke/krea2-identity-edit/tree/main) lora。
 
 <img width="2290" height="1123" alt="image" src="https://github.com/user-attachments/assets/ebb876d9-3bc6-436e-a87e-938b7dbf350a" />
 
