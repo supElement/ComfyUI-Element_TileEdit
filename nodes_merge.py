@@ -25,6 +25,7 @@ def _gaussian_blur_isotropic(x, sigma_px):
     x = F.conv2d(x, kh, padding=(radius, 0), groups=c)
     return x
 
+
 def _color_match(generated, reference, strength=1.0, weight=None):
     if strength <= 0.0: return generated
     
@@ -40,11 +41,12 @@ def _color_match(generated, reference, strength=1.0, weight=None):
 
     if weight is None:
         mask_3d = torch.ones_like(g)
+        w_edge = torch.ones_like(g[..., :1])
     else:
-        edge_mask = (weight < 0.8).float()
-        if edge_mask.sum() < 500:
-            edge_mask = torch.ones_like(weight)
-        mask_3d = edge_mask.expand_as(g)
+        mask_3d = (weight > 0.01).float().expand_as(g)
+        if mask_3d.sum() < 500:
+            mask_3d = torch.ones_like(g)
+        w_edge = 1.0 - weight
         
     sum_mask = mask_3d.sum(dim=(1, 2), keepdim=True).clamp_min(1e-6)
     
@@ -57,10 +59,22 @@ def _color_match(generated, reference, strength=1.0, weight=None):
     g_std = g_var.sqrt().clamp_min(0.05)
     r_std = r_var.sqrt().clamp_min(0.05)
     
-    matched = (g - g_mean) / g_std * r_std + r_mean
+    scale = (r_std / g_std).clamp(0.5, 2.0)
+    matched = (g - g_mean) * scale + r_mean
+    
+    diff = (matched - g).clamp(-0.35, 0.35)
+    
+    # 空间加权：中心应用 50% 强度，边缘应用 100% 强度
+    if weight is not None:
+        # 此时 weight 在中心是 1，边缘是 0
+        apply_w = strength * (weight * 0.8 + w_edge * 1.0)
+    else:
+        apply_w = strength
+        
+    out = g + diff * apply_w
 
-    out = matched * strength + g * (1.0 - strength)
     return out.clamp(0.0, 1.0).to(generated.dtype)
+
 
 def _generate_tile_mask(w, h, rtl, rtr, rbl, rbr, device, dtype):
     """根据当前分块的尺寸，直接生成尺寸为 (w, h) 的硬边缘 Mask。
@@ -187,20 +201,49 @@ class ElementTileMerge:
                 
             weight = _tile_weight(info, feather, device, dtype)
 
-            # 3. 获取硬 Mask (如果是手绘框且有圆角)
-            is_fg = info.get("kind") not in {"gap", "fallback", "unified"}
-            tile_mask = None
-            if is_fg:
-                rtl = int(info.get("radius_tl", 0))
-                rtr = int(info.get("radius_tr", 0))
-                rbl = int(info.get("radius_bl", 0))
-                rbr = int(info.get("radius_br", 0))
-                if rtl or rtr or rbl or rbr:
-                    tile_mask = _generate_tile_mask(
-                        w, h, rtl, rtr, rbl, rbr, device, dtype
-                    )
+            # # 3. 获取硬 Mask (如果是手绘框且有圆角)
+            # is_fg = info.get("kind") not in {"gap", "fallback", "unified"}
+            # tile_mask = None
+            # if is_fg:
+                # rtl = int(info.get("radius_tl", 0))
+                # rtr = int(info.get("radius_tr", 0))
+                # rbl = int(info.get("radius_bl", 0))
+                # rbr = int(info.get("radius_br", 0))
+                # if rtl or rtr or rbl or rbr:
+                    # tile_mask = _generate_tile_mask(
+                        # w, h, rtl, rtr, rbl, rbr, device, dtype
+                    # )
 
-            # 4. 计算 Pad 大小并执行拉伸
+            # 3. 获取 split 传过来的像素级 Mask
+            is_fg = info.get("kind") not in {"gap", "fallback", "unified"}
+            tile_mask = info.get("mask")
+            if tile_mask is not None:
+                tile_mask = tile_mask.to(device=device, dtype=dtype)
+                if tile_mask.ndim == 3:
+                    tile_mask = tile_mask.unsqueeze(-1)
+
+            # # 4. 计算 Pad 大小并执行拉伸
+            # overlap = grid.get("overlap", 0)
+            # pad_l = overlap if x <= 0 else 0
+            # pad_r = overlap if x + w >= work_w else 0
+            # pad_t = overlap if y <= 0 else 0
+            # pad_b = overlap if y + h >= work_h else 0
+            
+            # px_start = x - pad_l
+            # px_end = x + w + pad_r
+            # py_start = y - pad_t
+            # py_end = y + h + pad_b
+
+            # if pad_l > 0 or pad_r > 0 or pad_t > 0 or pad_b > 0:
+                # decoded = F.pad(decoded.permute(0, 3, 1, 2), (pad_l, pad_r, pad_t, pad_b), mode='replicate').permute(0, 2, 3, 1)
+                # if src is not None:
+                    # src = F.pad(src.permute(0, 3, 1, 2), (pad_l, pad_r, pad_t, pad_b), mode='replicate').permute(0, 2, 3, 1)
+                
+                # weight = F.pad(weight.permute(0, 3, 1, 2), (pad_l, pad_r, pad_t, pad_b), mode='replicate').permute(0, 2, 3, 1)
+                # if tile_mask is not None:
+                    # tile_mask = F.pad(tile_mask.permute(0, 3, 1, 2), (pad_l, pad_r, pad_t, pad_b), mode='replicate').permute(0, 2, 3, 1)
+
+            # 4. 计算 Pad 大小并执行拉伸 (保留原流程)
             overlap = grid.get("overlap", 0)
             pad_l = overlap if x <= 0 else 0
             pad_r = overlap if x + w >= work_w else 0
@@ -218,6 +261,8 @@ class ElementTileMerge:
                     src = F.pad(src.permute(0, 3, 1, 2), (pad_l, pad_r, pad_t, pad_b), mode='replicate').permute(0, 2, 3, 1)
                 
                 weight = F.pad(weight.permute(0, 3, 1, 2), (pad_l, pad_r, pad_t, pad_b), mode='replicate').permute(0, 2, 3, 1)
+                
+                # 【新增】Mask 也一起 pad，用 replicate 保持边缘的形状
                 if tile_mask is not None:
                     tile_mask = F.pad(tile_mask.permute(0, 3, 1, 2), (pad_l, pad_r, pad_t, pad_b), mode='replicate').permute(0, 2, 3, 1)
 

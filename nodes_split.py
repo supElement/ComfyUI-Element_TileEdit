@@ -160,8 +160,8 @@ def _compute_manual_fades(tiles, default_ov, out_w, out_h):
             t, other = tiles[i], tiles[j]
             
             # 如果其中一个是手绘框，直接跳过，后面会强制固定它
-            if t.get("kind") == "layer" or other.get("kind") == "layer":
-                continue
+            # if t.get("kind") == "layer" or other.get("kind") == "layer":
+                # continue
                 
             x_over = min(t["x"] + t["width"], other["x"] + other["width"]) - max(t["x"], other["x"])
             y_over = min(t["y"] + t["height"], other["y"] + other["height"]) - max(t["y"], other["y"])
@@ -855,10 +855,17 @@ class ElementTileSplit:
                                      l["cols"], l["rows"], ov)
                 for s in subs:
                     s["kind"] = "layer"
+                    
                     s["radius_tl"] = rg["rtl"]
                     s["radius_tr"] = rg["rtr"]
                     s["radius_bl"] = rg["rbl"]
                     s["radius_br"] = rg["rbr"]
+                    
+                    s["layer_w"] = rg["w"]
+                    s["layer_h"] = rg["h"]
+                    s["offset_x"] = s["x"] - rg["x"]
+                    s["offset_y"] = s["y"] - rg["y"]
+                    
                     s["layer_region"] = (rg["x"], rg["y"], rg["w"], rg["h"])
                 emit(subs, layer=l, layer_index=li)
 
@@ -942,6 +949,50 @@ class ElementTileSplit:
                     crop.permute(0, 3, 1, 2), gen_w, gen_h, method, "disabled"
                 ).permute(0, 2, 3, 1).contiguous()
             tile_images.append(crop)
+            
+            # 【新增】生成当前分块（含重叠区）基于绝对画布坐标的 Mask
+            tile_mask = None
+            if t.get("kind") == "layer":
+                rtl = int(t.get("radius_tl", 0))
+                rtr = int(t.get("radius_tr", 0))
+                rbl = int(t.get("radius_bl", 0))
+                rbr = int(t.get("radius_br", 0))
+                if rtl or rtr or rbl or rbr:
+                    lx, ly, lw, lh = t["layer_region"]
+                    bx2, by2 = lx + lw, ly + lh
+            
+                    # 膨胀量 = _inject_manual_overlap 里用的 half
+                    half = max(0, default_ov // 2)
+            
+                    ys = torch.arange(th, dtype=torch.float32) + 0.5 + ty
+                    xs = torch.arange(tw, dtype=torch.float32) + 0.5 + tx
+                    yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+            
+                    # 膨胀框（直边外扩 half）
+                    dx0, dy0 = lx - half, ly - half
+                    dx1, dy1 = bx2 + half, by2 + half
+                    mask_b = (xx >= dx0) & (xx <= dx1) & (yy >= dy0) & (yy <= dy1)
+            
+                    # 膨胀圆角：圆心不变，半径 r + half；超出即挖掉
+                    if rtl > 0:
+                        cx, cy = lx + rtl, ly + rtl
+                        m = (xx < cx) & (yy < cy)
+                        mask_b &= ~(m & ((xx - cx)**2 + (yy - cy)**2 > (rtl + half)**2))
+                    if rtr > 0:
+                        cx, cy = bx2 - rtr, ly + rtr
+                        m = (xx > cx) & (yy < cy)
+                        mask_b &= ~(m & ((xx - cx)**2 + (yy - cy)**2 > (rtr + half)**2))
+                    if rbl > 0:
+                        cx, cy = lx + rbl, by2 - rbl
+                        m = (xx < cx) & (yy > cy)
+                        mask_b &= ~(m & ((xx - cx)**2 + (yy - cy)**2 > (rbl + half)**2))
+                    if rbr > 0:
+                        cx, cy = bx2 - rbr, by2 - rbr
+                        m = (xx > cx) & (yy > cy)
+                        mask_b &= ~(m & ((xx - cx)**2 + (yy - cy)**2 > (rbr + half)**2))
+            
+                    tile_mask = mask_b.float().unsqueeze(0).unsqueeze(-1)
+
             grid_tiles.append({
                 "x": tx, "y": ty, "width": tw, "height": th,
                 "row": t["row"], "col": t["col"],
@@ -957,6 +1008,7 @@ class ElementTileSplit:
                 "radius_bl": t.get("radius_bl", 0),
                 "radius_br": t.get("radius_br", 0),
                 "layer_region": t.get("layer_region"),
+                "mask": tile_mask, # 将算好的像素级 mask 传入 grid
                 "touch_left": tx == 0,
                 "touch_top": ty == 0,
                 "touch_right": tx + tw >= out_w,
