@@ -64,6 +64,10 @@ Does everything in one pass: upscale → split into tiles → re-render each til
 
 Pure geometric splitting + image source intake, no model dependency. At execution, the backend **fully recomputes geometry**; the front-end UI is preview only.
 
+<img width="1005" height="1145" alt="image" src="https://github.com/user-attachments/assets/9785fe15-b11a-4789-a05e-f09e48b97855" />
+
+---
+
 ### Input Ports
 
 | Port | Type | Required | Description |
