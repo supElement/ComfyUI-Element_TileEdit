@@ -549,7 +549,9 @@ function installStyles() {
 .ets-tabbtn.on{background:#2a4b7a;border-color:#4e7fc0}
 .ets-field{display:inline-flex;align-items:center;gap:3px;color:#919bad;white-space:nowrap}
 .ets-field input[type=number]{width:44px;height:22px;padding:1px 4px;background:#0d1118;color:#e9eef8;border:1px solid #333d50;border-radius:4px;outline:none}
-.ets-field input#ets-gmax, .ets-field input#ets-ovpx, .ets-field input#ets-ovpct, .ets-field input#ets-utile{width:56px} /* 扩宽特定输入框防止数字显示不全 */
+.ets-field input#ets-ovpx, .ets-field input#ets-utile{width:56px} /* 扩宽特定输入框防止数字显示不全 */
+.ets-field input#ets-gmax, .ets-field input#ets-uup { width: 64px; }  /* U-upscale */
+.ets-field input#ets-ovpct { width: 42px; }  /* overlap % */
 .ets-field input.ovon{border-color:#43d9d1}
 
 .ets-ov-toggle {
