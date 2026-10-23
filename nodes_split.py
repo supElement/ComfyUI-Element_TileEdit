@@ -248,40 +248,6 @@ def _split_region(x, y, w, h, cols, rows, ov):
             })
     return out
 
-def _find_largest_free_rect(free):
-    """free[r][c]=True 为空闲。逐行直方图法求最大全空闲矩形。"""
-    rows, cols = len(free), len(free[0])
-    heights = [0] * cols
-    balanced = None   
-    widest   = None   
-    for r in range(rows):
-        for c in range(cols):
-            heights[c] = heights[c] + 1 if free[r][c] else 0
-        stack = []
-        c = 0
-        while c <= cols:
-            hcur = heights[c] if c < cols else 0
-            start = c
-            while stack and stack[-1][1] >= hcur:
-                s, hgt = stack.pop()
-                area = hgt * (c - s)
-                if area > 0:
-                    cand = (area, r - hgt + 1, s, hgt, c - s)
-                    if widest is None or area > widest[0]:
-                        widest = cand
-                    w_ = c - s
-                    aspect = max(hgt, w_) / max(1, min(hgt, w_))
-                    if balanced is None or area > balanced[0]:
-                        balanced = cand
-                start = s
-            stack.append((start, hcur))
-            c += 1
-    pick = widest
-    if not pick:
-        return None
-    return pick[1], pick[2], pick[3], pick[4]
-
-
 
 def _snap(v, step):
     return int(round(float(v) / step)) * step
@@ -311,210 +277,368 @@ def _balanced_subsplit(rects, gap_max_px):
                 out.append((nx, ny, min(sw, rx + rw - nx), min(sh, ry + rh - ny)))
     return out
 
+# ================================================================
+# 圆弧求交 + 单刀切割 + 安全探测扩张（与前端逐位镜像）
+# ================================================================
 
-def _merge_adjacent(rects, gap_max_px, min_short, aspect=GAP_MAX_ASPECT):
-    """相邻且并集仍为矩形、不超限的块两两合并（消解切分碎片）。
-    aspect 可放宽合并后的长宽比上限（v6 用 5.0 以吸收切出来的长条）。"""
-    rs = [list(r) for r in rects]
-    changed = True
-    while changed:
-        changed = False
-        for i in range(len(rs)):
-            for j in range(i + 1, len(rs)):
-                a, b = rs[i], rs[j]
-                if a[1] == b[1] and a[3] == b[3] and (a[0] + a[2] == b[0] or b[0] + b[2] == a[0]):
-                    m = [min(a[0], b[0]), a[1], a[2] + b[2], a[3]]
-                elif a[0] == b[0] and a[2] == b[2] and (a[1] + a[3] == b[1] or b[1] + b[3] == a[1]):
-                    m = [a[0], min(a[1], b[1]), a[2], a[3] + b[3]]
-                else:
-                    continue
-                if (m[2] > gap_max_px or m[3] > gap_max_px or
-                        max(m[2], m[3]) / max(1, min(m[2], m[3])) > aspect or
-                        min(m[2], m[3]) < min_short):
-                    continue
-                rs[i] = m; rs.pop(j); changed = True
-                break
-            if changed: break
-    return [tuple(r) for r in rs]
+def _get_top_y(lx, R):
+    rx, ry, rw, rh = R["x"], R["y"], R["w"], R["h"]
+    rtl = R.get("rtl", 0) or 0
+    rtr = R.get("rtr", 0) or 0
+    if lx < rx: return ry
+    if lx > rx + rw: return ry
+    if lx < rx + rtl:
+        cx, cy = rx + rtl, ry + rtl
+        dx = cx - lx
+        return cy - math.sqrt(max(0.0, rtl * rtl - dx * dx))
+    if lx > rx + rw - rtr:
+        cx, cy = rx + rw - rtr, ry + rtr
+        dx = lx - cx
+        return cy - math.sqrt(max(0.0, rtr * rtr - dx * dx))
+    return ry
 
-def _rect_overlap(a, b):
-    """两个 (x, y, w, h) 矩形的重叠面积。"""
-    w = max(0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
-    h = max(0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
-    return w * h
 
-def _rect_subtract(a, b):
-    """返回 a 减去 b 之后的矩形列表（a、b 均为 (x, y, w, h) 整数元组）。"""
-    ax, ay, aw, ah = a
-    bx, by, bw, bh = b
-    ix1, iy1 = max(ax, bx), max(ay, by)
-    ix2, iy2 = min(ax + aw, bx + bw), min(ay + ah, by + bh)
-    if ix1 >= ix2 or iy1 >= iy2:
-        return [a]
-    if ix1 <= ax and iy1 <= ay and ix2 >= ax + aw and iy2 >= ay + ah:
-        return []
-    out = []
-    if iy1 > ay:
-        out.append((ax, ay, aw, iy1 - ay))
-    if iy2 < ay + ah:
-        out.append((ax, iy2, aw, ay + ah - iy2))
-    if ix1 > ax:
-        out.append((ax, iy1, ix1 - ax, iy2 - iy1))
-    if ix2 < ax + aw:
-        out.append((ix2, iy1, ax + aw - ix2, iy2 - iy1))
-    return out
+def _get_bottom_y(lx, R):
+    rx, ry, rw, rh = R["x"], R["y"], R["w"], R["h"]
+    rbl = R.get("rbl", 0) or 0
+    rbr = R.get("rbr", 0) or 0
+    if lx < rx: return ry + rh
+    if lx > rx + rw: return ry + rh
+    if lx < rx + rbl:
+        cx, cy = rx + rbl, ry + rh - rbl
+        dx = cx - lx
+        return cy + math.sqrt(max(0.0, rbl * rbl - dx * dx))
+    if lx > rx + rw - rbr:
+        cx, cy = rx + rw - rbr, ry + rh - rbr
+        dx = lx - cx
+        return cy + math.sqrt(max(0.0, rbr * rbr - dx * dx))
+    return ry + rh
 
-def _get_inset_rect(R):
-    if isinstance(R, dict):
-        rx, ry, rw, rh = R["x"], R["y"], R["w"], R["h"]
-        rtl = R.get("rtl", 0); rtr = R.get("rtr", 0)
-        rbl = R.get("rbl", 0); rbr = R.get("rbr", 0)
-    else:
-        rx, ry, rw, rh = R
-        rtl = rtr = rbl = rbr = 0
-    
-    w = rw - rtl - rtr
-    h = rh - rtl - rbr
-    if w > 0 and h > 0:
-        return (rx + rtl, ry + rtl, w, h)
-    return (rx, ry, rw, rh)
 
-def _edge_fully_covered(B, R):
-    bx, by, bw, bh = B
-    if isinstance(R, dict):
-        rx, ry, rw, rh = R["x"], R["y"], R["w"], R["h"]
-    else:
-        rx, ry, rw, rh = R
+def _get_left_x(ly, R):
+    rx, ry, rw, rh = R["x"], R["y"], R["w"], R["h"]
+    rtl = R.get("rtl", 0) or 0
+    rbl = R.get("rbl", 0) or 0
+    if ly < ry: return rx
+    if ly > ry + rh: return rx
+    if ly < ry + rtl:
+        cx, cy = rx + rtl, ry + rtl
+        dy = cy - ly
+        return cx - math.sqrt(max(0.0, rtl * rtl - dy * dy))
+    if ly > ry + rh - rbl:
+        cx, cy = rx + rbl, ry + rh - rbl
+        dy = ly - cy
+        return cx - math.sqrt(max(0.0, rbl * rbl - dy * dy))
+    return rx
 
-    ix1, iy1 = max(bx, rx), max(by, ry)
-    ix2, iy2 = min(bx + bw, rx + rw), min(by + bh, ry + rh)
-    if ix1 >= ix2 or iy1 >= iy2:
+
+def _get_right_x(ly, R):
+    rx, ry, rw, rh = R["x"], R["y"], R["w"], R["h"]
+    rtr = R.get("rtr", 0) or 0
+    rbr = R.get("rbr", 0) or 0
+    if ly < ry: return rx + rw
+    if ly > ry + rh: return rx + rw
+    if ly < ry + rtr:
+        cx, cy = rx + rw - rtr, ry + rtr
+        dy = cy - ly
+        return cx + math.sqrt(max(0.0, rtr * rtr - dy * dy))
+    if ly > ry + rh - rbr:
+        cx, cy = rx + rw - rbr, ry + rh - rbr
+        dy = ly - cy
+        return cx + math.sqrt(max(0.0, rbr * rbr - dy * dy))
+    return rx + rw
+
+
+def _subtract_single_cut(p, R):
+    """与前端 subtractSingleCut 逐位镜像。None 表示 B 完全被 A 包含。"""
+    px, py, pw, ph = p
+    pb, pr = py + ph, px + pw
+
+    ox = max(px, R["x"]); oy = max(py, R["y"])
+    ox2 = min(pr, R["x"] + R["w"]); oy2 = min(pb, R["y"] + R["h"])
+    if ox >= ox2 or oy >= oy2:
+        return p
+
+    rtl = R.get("rtl", 0) or 0
+    rtr = R.get("rtr", 0) or 0
+    rbl = R.get("rbl", 0) or 0
+    rbr = R.get("rbr", 0) or 0
+
+    def _inside(x, y):
+        if x < R["x"] - 1e-6 or x > R["x"] + R["w"] + 1e-6: return False
+        if y < R["y"] - 1e-6 or y > R["y"] + R["h"] + 1e-6: return False
+        if rtl > 0 and x < R["x"] + rtl and y < R["y"] + rtl:
+            return (x - (R["x"] + rtl))**2 + (y - (R["y"] + rtl))**2 <= rtl*rtl + 1e-4
+        if rtr > 0 and x > R["x"] + R["w"] - rtr and y < R["y"] + rtr:
+            return (x - (R["x"] + R["w"] - rtr))**2 + (y - (R["y"] + rtr))**2 <= rtr*rtr + 1e-4
+        if rbl > 0 and x < R["x"] + rbl and y > R["y"] + R["h"] - rbl:
+            return (x - (R["x"] + rbl))**2 + (y - (R["y"] + R["h"] - rbl))**2 <= rbl*rbl + 1e-4
+        if rbr > 0 and x > R["x"] + R["w"] - rbr and y > R["y"] + R["h"] - rbr:
+            return (x - (R["x"] + R["w"] - rbr))**2 + (y - (R["y"] + R["h"] - rbr))**2 <= rbr*rbr + 1e-4
+        return True
+
+    if _inside(px, py) and _inside(pr, py) and _inside(px, pb) and _inside(pr, pb):
+        return None
+
+    cov_top    = (R["x"] <= px and R["x"] + R["w"] >= pr and R["y"] <= py and R["y"] + R["h"] > py) and _inside(px, py) and _inside(pr, py)
+    cov_bottom = (R["x"] <= px and R["x"] + R["w"] >= pr and R["y"] <  pb and R["y"] + R["h"] >= pb) and _inside(px, pb) and _inside(pr, pb)
+    cov_left   = (R["y"] <= py and R["y"] + R["h"] >= pb and R["x"] <= px and R["x"] + R["w"] > px) and _inside(px, py) and _inside(px, pb)
+    cov_right  = (R["y"] <= py and R["y"] + R["h"] >= pb and R["x"] <  pr and R["x"] + R["w"] >= pr) and _inside(pr, py) and _inside(pr, pb)
+
+    if not (cov_top or cov_bottom or cov_left or cov_right):
+        return p
+
+    best_area = float("inf"); best_type = None; best_cut = 0.0
+
+    if cov_top:
+        cut_y = min(_get_bottom_y(px, R), _get_bottom_y(pr, R))
+        cut_y = max(float(py), min(float(pb), cut_y))
+        area = pw * (pb - cut_y)
+        if 0 <= area < best_area: best_area = area; best_type = 'top'; best_cut = cut_y
+    if cov_bottom:
+        cut_y = max(_get_top_y(px, R), _get_top_y(pr, R))
+        cut_y = max(float(py), min(float(pb), cut_y))
+        area = pw * (cut_y - py)
+        if 0 <= area < best_area: best_area = area; best_type = 'bottom'; best_cut = cut_y
+    if cov_left:
+        cut_x = min(_get_right_x(py, R), _get_right_x(pb, R))
+        cut_x = max(float(px), min(float(pr), cut_x))
+        area = ph * (pr - cut_x)
+        if 0 <= area < best_area: best_area = area; best_type = 'left'; best_cut = cut_x
+    if cov_right:
+        cut_x = max(_get_left_x(py, R), _get_left_x(pb, R))
+        cut_x = max(float(px), min(float(pr), cut_x))
+        area = ph * (cut_x - px)
+        if 0 <= area < best_area: best_area = area; best_type = 'right'; best_cut = cut_x
+
+    if best_type is None:
+        return p
+
+    nx, ny, nw, nh = float(px), float(py), float(pw), float(ph)
+    if best_type == 'top':    ny = best_cut; nh = pb - best_cut
+    elif best_type == 'bottom': ny = py;     nh = best_cut - py
+    elif best_type == 'left':   nx = best_cut; nw = pr - best_cut
+    elif best_type == 'right':  nx = px;       nw = best_cut - px
+
+    if nw <= 0 or nh <= 0:
+        return None
+    return (nx, ny, nw, nh)
+
+
+def _rect_intersects_rounded_rect(rect, R):
+    rx, ry, rw, rh = rect
+    rx2, ry2 = rx + rw, ry + rh
+
+    if rx2 <= R["x"] or rx >= R["x"] + R["w"] or ry2 <= R["y"] or ry >= R["y"] + R["h"]:
         return False
 
-    def _inside(px, py):
-        return rx - 1e-6 <= px <= rx + rw + 1e-6 and ry - 1e-6 <= py <= ry + rh + 1e-6
+    rtl = R.get("rtl", 0) or 0
+    rtr = R.get("rtr", 0) or 0
+    rbl = R.get("rbl", 0) or 0
+    rbr = R.get("rbr", 0) or 0
 
-    if rx <= bx and rx + rw >= bx + bw and ry <= by and ry + rh > by:
-        if _inside(bx, by) and _inside(bx + bw, by): return True
-    if rx <= bx and rx + rw >= bx + bw and ry < by + bh and ry + rh >= by + bh:
-        if _inside(bx, by + bh) and _inside(bx + bw, by + bh): return True
-    if ry <= by and ry + rh >= by + bh and rx <= bx and rx + rw > bx:
-        if _inside(bx, by) and _inside(bx, by + bh): return True
-    if ry <= by and ry + rh >= by + bh and rx < bx + bw and rx + rw >= bx + bw:
-        if _inside(bx + bw, by) and _inside(bx + bw, by + bh): return True
+    cx0 = R["x"] + max(rtl, rbl)
+    cx1 = R["x"] + R["w"] - max(rtr, rbr)
+    cy0 = R["y"] + max(rtl, rtr)
+    cy1 = R["y"] + R["h"] - max(rbl, rbr)
+    if rx < cx1 and rx2 > cx0 and ry < cy1 and ry2 > cy0:
+        return True
+
+    def circle_intersects(cx, cy, r):
+        nx = max(rx, min(cx, rx2))
+        ny = max(ry, min(cy, ry2))
+        return (nx - cx) ** 2 + (ny - cy) ** 2 < r * r
+
+    if rtl > 0:
+        cx = R["x"] + rtl; cy = R["y"] + rtl
+        nx = max(rx, min(cx, rx2)); ny = max(ry, min(cy, ry2))
+        if nx <= cx and ny <= cy and circle_intersects(cx, cy, rtl): return True
+    if rtr > 0:
+        cx = R["x"] + R["w"] - rtr; cy = R["y"] + rtr
+        nx = max(rx, min(cx, rx2)); ny = max(ry, min(cy, ry2))
+        if nx >= cx and ny <= cy and circle_intersects(cx, cy, rtr): return True
+    if rbl > 0:
+        cx = R["x"] + rbl; cy = R["y"] + R["h"] - rbl
+        nx = max(rx, min(cx, rx2)); ny = max(ry, min(cy, ry2))
+        if nx <= cx and ny >= cy and circle_intersects(cx, cy, rbl): return True
+    if rbr > 0:
+        cx = R["x"] + R["w"] - rbr; cy = R["y"] + R["h"] - rbr
+        nx = max(rx, min(cx, rx2)); ny = max(ry, min(cy, ry2))
+        if nx >= cx and ny >= cy and circle_intersects(cx, cy, rbr): return True
     return False
 
 
+def _get_safe_expand(rect, direction, max_dist, regions):
+    x, y, w, h = rect
+    safe = 0.0
+    step = 4.0
+    while safe < max_dist:
+        d = min(max_dist - safe, step)
+        if direction == 'top':      test_rect = (x, y - safe - d, w, d)
+        elif direction == 'bottom': test_rect = (x, y + h + safe, w, d)
+        elif direction == 'left':   test_rect = (x - safe - d, y, d, h)
+        elif direction == 'right':  test_rect = (x + w + safe, y, d, h)
+        else: break
+
+        hit = any(_rect_intersects_rounded_rect(test_rect, rg) for rg in regions)
+        if hit:
+            if d > 1:
+                d = 1
+                if direction == 'top':      test_rect = (x, y - safe - 1, w, 1)
+                elif direction == 'bottom': test_rect = (x, y + h + safe, w, 1)
+                elif direction == 'left':   test_rect = (x - safe - 1, y, 1, h)
+                elif direction == 'right':  test_rect = (x + w + safe, y, 1, h)
+                hit1 = any(_rect_intersects_rounded_rect(test_rect, rg) for rg in regions)
+                if hit1: break
+                safe += 1
+                continue
+            break
+        safe += d
+    return safe
+
+
+def _can_merge(A, B, eps=5.0):
+    """相切边等长（允许 eps 容差）+ 贴合才允许合并。"""
+    x, y, w, h = A
+    qx, qy, qw, qh = B
+
+    vert_align = abs(x - qx) <= eps and abs(w - qw) <= eps
+    vert_touch = abs((y + h) - qy) <= eps or abs((qy + qh) - y) <= eps
+    if vert_align and vert_touch:
+        return True
+
+    horz_align = abs(y - qy) <= eps and abs(h - qh) <= eps
+    horz_touch = abs((x + w) - qx) <= eps or abs((qx + qw) - x) <= eps
+    if horz_align and horz_touch:
+        return True
+    return False
 
 def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
                     regions=None, target_tiles=GAP_TARGET_TILES):
-    """【严格按照需求】先均分、扣除手绘框、长条变胖合并、超尺寸平分。"""
+    """与前端 planGaps 逐位镜像：均分 → 单刀切割 → 大块吞最小碎块 → 变胖 → 超尺寸平分。"""
     if regions is None:
         regions = []
-        
+
+    if not regions:
+        return [(int(r[0]), int(r[1]), int(r[2]), int(r[3]))
+                for r in _balanced_subsplit([(0, 0, out_w, out_h)], gap_max_px)]
+
     base_grid = _balanced_subsplit([(0, 0, out_w, out_h)], gap_max_px)
-    
+
+    # 1) 均分 + 手绘框单刀切割（subtractSingleCut 镜像）
     pieces = []
     for b in base_grid:
         parts = [b]
         for rg in regions:
-            rr_dict = rg if isinstance(rg, dict) else {"x": rg[0], "y": rg[1], "w": rg[2], "h": rg[3]}
-            # 计算内缩矩形用于切割
-            rr_inset = _get_inset_rect(rr_dict)
+            rr_dict = rg if isinstance(rg, dict) else {
+                "x": rg[0], "y": rg[1], "w": rg[2], "h": rg[3],
+                "rtl": 0, "rtr": 0, "rbl": 0, "rbr": 0
+            }
             nxt = []
             for p in parts:
-                # 判断是否覆盖仍然用带圆角的 rr_dict
-                if _edge_fully_covered(p, rr_dict):
-                    nxt.extend(_rect_subtract(p, rr_inset))
-                else:
-                    nxt.append(p)
+                res = _subtract_single_cut(p, rr_dict)
+                if res is not None:
+                    nxt.append(res)
             parts = nxt
-            if not parts: break
+            if not parts:
+                break
         pieces.extend(parts)
-        
+
+    # 2) 合并循环：每次只吞一个"面积最小的可合并邻居"，吞完立即重排、重扫
     changed = True
-    while changed:
+    iter_count = 0
+    while changed and iter_count < 60:
         changed = False
+        iter_count += 1
+        pieces.sort(key=lambda p: -(p[2] * p[3]))  # 大块优先
+
         for i in range(len(pieces)):
-            if pieces[i] is None: continue
-            x, y, w, h = pieces[i]
-            if max(w, h) / max(1, min(w, h)) <= 5.0:
+            if pieces[i] is None:
                 continue
-                
-            ox, oy, ow, oh = x, y, w, h
-            # 长条向外扩展（稍微覆盖手绘框），直到比例降至 5:1
-            if w > h:
-                diff = w / 5.0 - h
-                expand_t = min(y, diff / 2)
-                expand_b = diff - expand_t
-                if expand_b > out_h - (y + h): 
-                    expand_b = out_h - (y + h)
-                    expand_t = diff - expand_b
-                y = max(0, int(y - expand_t))
-                h = min(out_h - y, int(h + diff))
-            else:
-                diff = h / 5.0 - w
-                expand_l = min(x, diff / 2)
-                expand_r = diff - expand_l
-                if expand_r > out_w - (x + w):
-                    expand_r = out_w - (x + w)
-                    expand_l = diff - expand_r
-                x = max(0, int(x - expand_l))
-                w = min(out_w - x, int(w + diff))
-                
-            nx, ny, nw, nh = x, y, w, h
+            x, y, w, h = pieces[i]
+
+            # ---- 2a. 收集可合并邻居，挑面积最小的吞 ----
+            best_j = -1
+            best_area = float("inf")
             for j in range(len(pieces)):
-                if i == j or pieces[j] is None: continue
-                q = pieces[j]
-                ix = max(nx, q[0]); iy = max(ny, q[1])
-                ix2 = min(nx + nw, q[0] + q[2]); iy2 = min(ny + nh, q[1] + q[3])
-                if ix < ix2 and iy < iy2:
-                    nx2 = min(nx, q[0]); ny2 = min(ny, q[1])
-                    nx = nx2; ny = ny2
-                    nw = max(nx + nw, q[0] + q[2]) - nx
-                    nh = max(ny + nh, q[1] + q[3]) - ny
-                    pieces[j] = None 
-            
-            # 只有尺寸发生变化才更新，防止贴边时无限循环
-            if (nx, ny, nw, nh) != (ox, oy, ow, oh):
-                pieces[i] = (nx, ny, nw, nh)
+                if i == j or pieces[j] is None:
+                    continue
+                if not _can_merge((x, y, w, h), pieces[j]):
+                    continue
+                a = pieces[j][2] * pieces[j][3]
+                if a < best_area:
+                    best_area = a
+                    best_j = j
+
+            if best_j >= 0:
+                qx, qy, qw, qh = pieces[best_j]
+                nx = min(x, qx); ny = min(y, qy)
+                nx_end = max(x + w, qx + qw)
+                ny_end = max(y + h, qy + qh)
+                pieces[i] = (nx, ny, nx_end - nx, ny_end - ny)
+                pieces[best_j] = None
                 changed = True
-            
+                break  # 重新排序、重新扫描，避免累积尺寸问题
+
+            # ---- 2b. 无邻居可吞，且自身细长时向 A 外变胖 ----
+            if max(w, h) / max(1, min(w, h)) > 5.0:
+                target_w, target_h = w, h
+                if w > h:
+                    target_h = math.ceil(w / 5.0)
+                else:
+                    target_w = math.ceil(h / 5.0)
+
+                bx, by, bw, bh = x, y, w, h
+
+                if target_h > h:
+                    diff = target_h - h
+                    safe_t = _get_safe_expand((x, y, w, h), 'top',
+                                              min(diff, y), regions)
+                    safe_b = _get_safe_expand((x, y - safe_t, w, h + safe_t), 'bottom',
+                                              min(diff - safe_t, out_h - (y + h)), regions)
+                    by = y - safe_t
+                    bh = h + safe_t + safe_b
+
+                if target_w > w:
+                    diff = target_w - w
+                    # 用变胖后的 [bx,by,bw,bh] 再做右向探测
+                    safe_l = _get_safe_expand((bx, by, bw, bh), 'left',
+                                              min(diff, bx), regions)
+                    safe_r = _get_safe_expand((bx - safe_l, by, bw + safe_l, bh), 'right',
+                                              min(diff - safe_l, out_w - (bx + bw)), regions)
+                    bx = bx - safe_l
+                    bw = bw + safe_l + safe_r
+
+                overlaps_neighbor = False
+                for j in range(len(pieces)):
+                    if i == j or pieces[j] is None:
+                        continue
+                    qx, qy, qw, qh = pieces[j]
+                    ix = max(bx, qx); iy = max(by, qy)
+                    ix2 = min(bx + bw, qx + qw); iy2 = min(by + bh, qy + qh)
+                    if ix < ix2 - 0.1 and iy < iy2 - 0.1:
+                        overlaps_neighbor = True
+                        break
+
+                if (not overlaps_neighbor) and (bx != x or by != y or bw != w or bh != h):
+                    pieces[i] = (bx, by, bw, bh)
+                    changed = True
+                    break
+
         if changed:
             pieces = [p for p in pieces if p is not None]
-            
-    # 若合并后超过max side参数，则对这个分块做平分
+
+    # 3) 超 gap_max 的块做均衡切分，同时把 float 坐标收敛成 int 以防 _balanced_subsplit 报错
     final_pieces = []
     for p in pieces:
-        if p[2] > gap_max_px or p[3] > gap_max_px:
-            final_pieces.extend(_balanced_subsplit([p], gap_max_px))
+        p_int = (int(round(p[0])), int(round(p[1])),
+                 int(round(p[2])), int(round(p[3])))
+        if p_int[2] > gap_max_px or p_int[3] > gap_max_px:
+            final_pieces.extend(_balanced_subsplit([p_int], gap_max_px))
         else:
-            final_pieces.append(p)
-            
-    clean_pieces = []
-    for p in final_pieces:
-        parts = [p]
-        for c in clean_pieces:
-            nxt = []
-            for pt in parts:
-                nxt.extend(_rect_subtract(pt, c))
-            parts = nxt
-            if not parts: break
-        clean_pieces.extend(parts)
-        
-    # 应用 overlap 向外扩展（修正边界）
-    if overlap_px > 0 and clean_pieces:
-        half = max(0, overlap_px // 2)
-        res = []
-        for (x, y, w, h) in clean_pieces:
-            nx = max(0, x - half)
-            ny = max(0, y - half)
-            nw = min(out_w - nx, x + w + half - nx)
-            nh = min(out_h - ny, y + h + half - ny)
-            res.append((nx, ny, nw, nh))
-        clean_pieces = res
-        
-    return clean_pieces
+            final_pieces.append(p_int)
+    return final_pieces
+
 
 
 # ---------------------------------------------------------------- 图像源 / 预览
