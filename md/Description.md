@@ -64,6 +64,9 @@
 
 纯几何分块 + 图像源接入，无模型依赖。后端执行时会**全量重算几何**，前端 UI 只做预览。
 
+<img width="1005" height="1145" alt="image" src="https://github.com/user-attachments/assets/9785fe15-b11a-4789-a05e-f09e48b97855" />
+
+---
 ### 输入端口
 
 | 端口 | 类型 | 必接 | 说明 |
