@@ -9,7 +9,7 @@
   <sub> 原名：ComfyUI-Element_TileUpscale </sub>
 
 专为图像编辑模型设计的分块精修 / 编辑 / 放大 ComfyUI 扩展（仅限单图），提供强大的分块控制与局部精修能力。
-支持模型：Qwen-Image 2.1 / Edit 2509 / 2511、FLUX.3 / FLUX.2 klein、Krea2 + lora。
+支持模型：Qwen-Image 2.1 / Edit 2509 / 2511、FLUX.3 / FLUX.2 klein、Krea2 + identity_edit lora、Moss + Moss-Image-Edit lora。
 
 ✨ 分块放大：告别传统 img2img 的跨块撕裂。
 用分块参考保证跨块一致性。你可以放心将 Denoise 重绘强度拉高至 0.7–1.0，同时完美保持原图的人物身份、结构与纹理细节。支持自定义每采样步的参考强度，精准平衡“修复强度”与“一致性”，这是传统 img2img 分块放大无法做到的。
@@ -18,8 +18,8 @@
 手动分割模式（by Manual）提供了真正的“分块级语义隔离”与像素级控制力。例如：你可以精准框选“白衬衫”所在的图层，并在对应 Layer 的 Prompt 中仅输入“改成蓝衬衫”。未被框选的背景、头发、桌子等会自动划入 Gap fill（补块） 区域，不接收该指令（或仅接收基础的全局画质增强指令），从而完美保持原状。
 > 操作方式：CTRL + 左键拖动 添加分块。
 > 独立放大：每个手动分割的图层均可单独设置放大尺寸，让核心编辑区域获得更高的分辨率与细节表现。
-> ⚠️ 使用 Krea2 模型需要搭配 [krea2_identity_edit](https://huggingface.co/conradlocke/krea2-identity-edit/tree/main) lora。
-
+> ⚠️ 使用 Krea2 模型编辑需要搭配 [krea2_identity_edit](https://huggingface.co/conradlocke/krea2-identity-edit/tree/main) lora。
+> ⚠️ 使用 Moss 模型编辑需要搭配 [Moss-Image-Edit](https://huggingface.co/chinoll/Moss-Image-Edit/tree/main) lora。
 ---
 
 <img width="2379" height="1093" alt="image" src="https://github.com/user-attachments/assets/1464d90d-e044-4423-9d27-7fa2a581a66e" />
@@ -82,6 +82,7 @@
 | **Qwen-Image Edit 2509** | **1.0** | 384×384 vision bucket + reference latent 双通道 | ★★★★ | 与 2511 同源，参考通道成熟，可拉满，缺少细节 |
 | **FLUX.2 klein base** | **0.7 – 1.0** | 仅 reference-latent 通道（text encoder 为纯文本，无 vision grounding） | ★★★★ | 缺少 vision 通道, 面部有些油, 偏色, 可使用[Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 做色彩或变形校正，搭配防偏移类lora使用时可提升至★★★★☆ |
 | **Krea2 + krea2_identity_edit** | **0.7 – 0.8** | 手动重建 `[text｜source(frame=1)｜target(frame=0)]` in-context 前向 | ★★★☆ | 高降噪下色彩一致性最好，但有时会出现脏点，0.7–0.8 是清晰度与稳定的最佳平衡点 |
+| **MOSS-Image + Moss-Image-Edit** | **0.7 – 1** | 原生 `reference_latents` 通道，采用 `index_timestep_zero_text_start` 布局；ComfyUI 自动预计算 `ref_kv` 加速 | ★★★ | 新版comfyUI 原生支持 Edit LoRA。借助 1:1 尺寸参考注入，细节保留，对超过1K的图像编辑不稳定。因涉及首步 K/V 预计算，第一步耗时略长。推荐搭配 ComfyUI 最新版本（#17296）。 |
 | **FLUX.3 klein turbo** | **0.7 – 0.8** | text encoder 仅文本有效，无 vision grounding | ★★★ | 缺少细节、易变形（也可能是comfyUI实现的问题），优点是不容易脏 |
 | **FLUX.2 klein turbo** | **0.7 – 0.8** | 仅 reference-latent 通道（text encoder 为纯文本，无 vision grounding） | ★★★ | 缺少 vision 通道，参考信号弱一档，很容易脏、偏色, 可使用[Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 做色彩或变形校正，搭配防偏移类lora使用时可提升至★★★☆ |
 | **Qwen-Image-2512/SDXL系列** | **0.2 – 0.5** | 无 | ★ | 非编辑模型无一致性锚定，即使接入ipadapter等方法，效果依然有限 |
