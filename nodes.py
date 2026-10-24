@@ -24,6 +24,7 @@ from .common import (
     _reference_method,
     _tokenizer_handles_images,
     _is_flux2_family,
+    _is_moss_image,
     _is_krea2,
     _in_context_model,
     _scheduled_ref_model,
@@ -230,18 +231,23 @@ class TiledUpscale:
             source_holder = None
             sampling_model = _scheduled_ref_model(model, strength_values)   
             reference_method = _reference_method(model, positive)
-            if clip is not None and prompt and _tokenizer_handles_images(clip) and not _is_flux2_family(model):
-                grounded_conditioning = True
-                mode = "conditioning (grounded)"
-            elif clip is not None and prompt:
+            if clip is not None and prompt:
                 dm_name = type(model.get_model_object("diffusion_model")).__name__.lower()
-                if "flux3" in dm_name:
+                if _is_moss_image(model):
+                    mode = "conditioning (MOSS-Image)"
+                    logging.info("[TiledUpscale] MOSS-Image detected; tiles ride as native "
+                                 "reference latents (method index_timestep_zero_text_start). "
+                                 "Per-step reference_strength works: ref_kv is stripped per step.")
+                elif _tokenizer_handles_images(clip) and not _is_flux2_family(model):
+                    grounded_conditioning = True
+                    mode = "conditioning (grounded)"
+                elif "flux3" in dm_name:
                     logging.info("[TiledUpscale] FLUX.3's DiT taps Qwen3-VL text-only (no vision "
                                  "tokens); each tile rides as a native reference latent instead.")
                 else:
-                    logging.warning("[TiledUpscale] this model's text encoder is text-only (e.g. FLUX.2 "
-                                    "klein's Qwen3); the tile cannot enter a vision slot, falling back to "
-                                    "the reference-latent-only path with the original conditioning.")
+                    logging.warning("[TiledUpscale] this model's text encoder is text-only (e.g. "
+                                    "FLUX.2 klein's Qwen3); the tile cannot enter a vision slot, "
+                                    "falling back to the reference-latent-only path.")
     
         source = self._upscale(image, upscale_by, alignment)
         _, img_h, img_w, _ = source.shape

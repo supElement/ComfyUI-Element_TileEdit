@@ -18,6 +18,7 @@ from .common import (
     _reference_method,
     _tokenizer_handles_images,
     _is_flux2_family,
+    _is_moss_image,
     _is_krea2,
     _grounded_reference_conditioning,
     _grounded_conditioning,
@@ -110,7 +111,12 @@ class ElementTileEncode:
         else:
             mode = "conditioning"
             grounded, reference_method = False, _reference_method(model, [])
-            if any(p.strip() for p in prompts) and _tokenizer_handles_images(clip) \
+            if _is_moss_image(model):
+                mode = "conditioning (MOSS-Image)"
+                logging.info("[TileEncode] MOSS-Image detected; references ride as native "
+                             "reference latents (index_timestep_zero_text_start). "
+                             "Per-step reference_strength works on both ref_kv and ref_latents.")
+            elif any(p.strip() for p in prompts) and _tokenizer_handles_images(clip) \
                     and not _is_flux2_family(model):
                 grounded = True
                 mode = "conditioning (grounded)"

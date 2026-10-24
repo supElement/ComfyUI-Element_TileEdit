@@ -62,6 +62,10 @@ def _reference_method(model, conditioning):
     except Exception:
         return None
     dm_name = type(diffusion_model).__name__.lower()
+    
+    if _is_moss_dm(diffusion_model):
+        return "index_timestep_zero_text_start"
+    
     if "flux" in dm_name and "flux3" not in dm_name:
         return "index"
     if getattr(diffusion_model, "default_ref_method", "unset") is None:
@@ -111,6 +115,25 @@ def _is_flux2_family(model):
         return "flux" in type(dm).__name__.lower()
     except Exception:
         return False
+
+def _is_moss_dm(dm):
+    """直接对 DiT 对象判断，供 wrapper 内部（executor.class_obj）使用。
+    MOSS-Image 的 DiT 有 shared_block_modulation + video_embedder 这对独有属性；
+    类名兜底，供未来重命名时依然命中。"""
+    if dm is None:
+        return False
+    if "moss" in type(dm).__name__.lower():
+        return True
+    return hasattr(dm, "shared_block_modulation") and hasattr(dm, "video_embedder")
+
+
+def _is_moss_image(model):
+    """对 MODEL (ModelPatcher) 判断。"""
+    try:
+        dm = model.get_model_object("diffusion_model")
+    except Exception:
+        return False
+    return _is_moss_dm(dm)
 
 # ---------------------------------------------------------------------------
 # reference_strength 每步调度
@@ -186,10 +209,8 @@ def _refs_are_present(refs):
 
 
 def _find_ref_slot(args, kwargs):
-    """DiT forward 各模型族的 ref 传递位置不同：Qwen/FLUX.2/FLUX.3(蒸馏慢路径) 把
-    ref_latents 按位置参数传进 wrapper，且是 list 形态（args 里的某个位置）；
-    FLUX.3 base 在 inference_mode 快路径下改发 kwargs 里的 ref_states/ref_shapes。
-    返回 ("args", i) / ("kwargs", key) / ("flux3", None) / (None, None)。"""
+    if kwargs.get("ref_kv") is not None:
+        return ("kwargs", "ref_kv")
     for key in ("ref_latents", "reference_latents"):
         if kwargs.get(key) is not None:
             return ("kwargs", key)
@@ -226,48 +247,55 @@ def _set_refs(args, kwargs, kind, slot, value):
 # ---------------------------------------------------------------------------
 _NOREF_CACHE_BYPASS = None
 
-def _probe_pose_branch_cache(cls):
-    """对已安装核心的 PoseBranchCache.select 做真实行为探测。
-    返回 True=仍有 bug / False=已修复 / None=探针无法进行（结构变了）。
-    生产场景里 K_noref 槽排在 K_ref 槽后面时 list.remove 崩，探针原样复现。"""
-    c = object.__new__(cls)            
-    c._pending = {}                    
-    c.slot = None
-    c.slots = [{"key": torch.zeros(1, 8)},   
-               {"key": torch.zeros(1, 4)}]   
-    try:
-        hit = cls.select(c, torch.zeros(1, 4), create=False)
-    except RuntimeError:
-        return True                     
-    except Exception:
-        return None                     
-    return bool(hit) and c.slot is c.slots[-1]
+# def _probe_pose_branch_cache(cls):
+    # """对已安装核心的 PoseBranchCache.select 做真实行为探测。
+    # 返回 True=仍有 bug / False=已修复 / None=探针无法进行（结构变了）。
+    # 生产场景里 K_noref 槽排在 K_ref 槽后面时 list.remove 崩，探针原样复现。"""
+    # c = object.__new__(cls)            
+    # c._pending = {}                    
+    # c.slot = None
+    # c.slots = [{"key": torch.zeros(1, 8)},   
+               # {"key": torch.zeros(1, 4)}]   
+    # try:
+        # hit = cls.select(c, torch.zeros(1, 4), create=False)
+    # except RuntimeError:
+        # return True                     
+    # except Exception:
+        # return None                     
+    # return bool(hit) and c.slot is c.slots[-1]
 
 def _noref_cache_bypass_needed():
-    """True = 摘除参考的前向需要隔离 prefix cache。进程内只判定一次。"""
+    """True = 摘除参考的前向需要隔离 prefix cache。进程内只判定一次。
+
+    本扩展在 guidance 模式同一采样步内交替执行"有参考"（out_with）和
+    "无参考"（out_without / binary s<=0.001）两路前向，前缀长度必然不同。
+    上游 Qwen Image 2.1 的 prefix cache 用固定 cache_shape 预分配 slot
+    （见 PrefixCacheSlot / select_prefix_cache），无参考前向复用会触发
+    `dest.copy_` 的形状错误。因此无参考那一路必须始终隔离 cache——与上游
+    MRU bug（#16511/#16947）是否修复无关。下面的探测/日志只作诊断信息。
+    """
     global _NOREF_CACHE_BYPASS
     if _NOREF_CACHE_BYPASS is not None:
         return _NOREF_CACHE_BYPASS
-    result = True   
-    try:
-        import comfy.ldm.wan.model_animate2 as _m2
-        cls = getattr(_m2, "PoseBranchCache", None)
-        if cls is not None and hasattr(cls, "select"):
-            probe = _probe_pose_branch_cache(cls)
-            if probe is not None:
-                result = probe
-            else:
-                result = "self.slots.remove(" in inspect.getsource(cls.select)
-    except Exception:
-        pass
-    if result:
-        logging.info("[TileSchedule] core PoseBranchCache.select still has the "
-                     "list.remove bug (#16511/#16947); reference-stripped forwards "
-                     "will bypass the Qwen Image 2.1 prefix cache.")
-    else:
-        logging.info("[TileSchedule] core prefix cache looks fixed; normal logic.")
-    _NOREF_CACHE_BYPASS = result
-    return result
+
+    # try:
+        # import comfy.ldm.wan.model_animate2 as _m2
+        # cls = getattr(_m2, "PoseBranchCache", None)
+        # if cls is not None and hasattr(cls, "select"):
+            # probe = _probe_pose_branch_cache(cls)
+            # if probe:
+                # logging.info("[TileSchedule] core PoseBranchCache.select still has "
+                             # "the list.remove bug (#16511/#16947).")
+            # else:
+                # logging.info("[TileSchedule] core prefix cache MRU logic looks fixed.")
+    # except Exception:
+        # pass
+
+    logging.info("[TileSchedule] reference-stripped forwards always bypass the "
+                 "Qwen Image 2.1 prefix cache: mixed prefix lengths share one "
+                 "sampling step and cannot coexist in a fixed-shape slot.")
+    _NOREF_CACHE_BYPASS = True
+    return True
 
 def _uses_prefix_cache(dm):
     """只有 Qwen Image 2.1 的 transformer 挂着这套缓存（select_prefix_cache 是它的方法）。
@@ -285,11 +313,15 @@ def _find_topts(args, kwargs):
     return (None, None)
 
 def _drop_refs_no_cache(executor, args, kwargs):
-    """摘除参考的那次前向：浅拷 transformer_options，关掉 prefix cache。
-    依据核心文档化开关：select_prefix_cache 见 options['device']=='off'
-    直接返回 (None, False) —— 该次前向既不读也不写缓存，有参考主路缓存不受影响。"""
+    """摘除参考的那次前向：浅拷 transformer_options，关掉 prefix cache；
+    并清掉采样器通过 kwarg 注入的 prefix_cache（其 slot 形状按有参考那次
+    的 prefix 长度预分配，无参考那次前缀更短，dest.copy_ 会形状不匹配）。"""
     if not _uses_prefix_cache(getattr(executor, "class_obj", None)):
         return args, kwargs
+
+    if kwargs.get("prefix_cache") is not None:
+        kwargs = dict(kwargs)
+        kwargs["prefix_cache"] = None
     kind, slot = _find_topts(args, kwargs)
     if kind == "kwargs":
         opts = dict(kwargs["transformer_options"])
@@ -319,7 +351,8 @@ def _scheduled_ref_model(model, strength_schedule):
     binary = all(v <= 0.001 or v >= 0.999 for v in values)
     schedule = _StepSchedule(values)
     patched = model.clone()
-    state = {"flux3_logged": False}
+    # state = {"flux3_logged": False}
+    state = {"flux3_logged": False, "moss_checked": False, "is_moss": False}
     safe_strip = _noref_cache_bypass_needed()   # 核心有 bug 才隔离缓存
 
     def wrapper(executor, x, timesteps, context, *args, **kwargs):
@@ -351,6 +384,15 @@ def _scheduled_ref_model(model, strength_schedule):
         s = schedule.strength(timesteps)
         if s >= 0.999:
             return executor(x, timesteps, context, *args, **kwargs)
+        
+        # --- 新增 MOSS 特殊处理 ---
+        if not state.get("moss_checked"):
+            state["moss_checked"] = True
+            dm = getattr(executor, "class_obj", None)
+            state["is_moss"] = _is_moss_dm(dm)
+        strip_value = [] if (state["is_moss"] and slot in ("ref_latents", "reference_latents")) else None
+        # --- 新增加结束 ---
+        
         if binary or s <= 0.001:
             args2, kwargs2 = _set_refs(args, kwargs, kind, slot, None)
             if safe_strip:                                       
