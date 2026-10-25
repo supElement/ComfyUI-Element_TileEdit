@@ -247,23 +247,6 @@ def _set_refs(args, kwargs, kind, slot, value):
 # ---------------------------------------------------------------------------
 _NOREF_CACHE_BYPASS = None
 
-# def _probe_pose_branch_cache(cls):
-    # """对已安装核心的 PoseBranchCache.select 做真实行为探测。
-    # 返回 True=仍有 bug / False=已修复 / None=探针无法进行（结构变了）。
-    # 生产场景里 K_noref 槽排在 K_ref 槽后面时 list.remove 崩，探针原样复现。"""
-    # c = object.__new__(cls)            
-    # c._pending = {}                    
-    # c.slot = None
-    # c.slots = [{"key": torch.zeros(1, 8)},   
-               # {"key": torch.zeros(1, 4)}]   
-    # try:
-        # hit = cls.select(c, torch.zeros(1, 4), create=False)
-    # except RuntimeError:
-        # return True                     
-    # except Exception:
-        # return None                     
-    # return bool(hit) and c.slot is c.slots[-1]
-
 def _noref_cache_bypass_needed():
     """True = 摘除参考的前向需要隔离 prefix cache。进程内只判定一次。
 
@@ -277,19 +260,6 @@ def _noref_cache_bypass_needed():
     global _NOREF_CACHE_BYPASS
     if _NOREF_CACHE_BYPASS is not None:
         return _NOREF_CACHE_BYPASS
-
-    # try:
-        # import comfy.ldm.wan.model_animate2 as _m2
-        # cls = getattr(_m2, "PoseBranchCache", None)
-        # if cls is not None and hasattr(cls, "select"):
-            # probe = _probe_pose_branch_cache(cls)
-            # if probe:
-                # logging.info("[TileSchedule] core PoseBranchCache.select still has "
-                             # "the list.remove bug (#16511/#16947).")
-            # else:
-                # logging.info("[TileSchedule] core prefix cache MRU logic looks fixed.")
-    # except Exception:
-        # pass
 
     logging.info("[TileSchedule] reference-stripped forwards always bypass the "
                  "Qwen Image 2.1 prefix cache: mixed prefix lengths share one "
@@ -813,12 +783,15 @@ def _split_frequencies(image, radius):
     # relative = weight / weight_max.clamp(min=1e-8)
     # return ((relative - 1.0) * _DETAIL_SHARPNESS + 1.0).clamp(0.0, 1.0)
 
-def _detail_weight(weight, weight_max):
-    """Moderately steep competition weight: smooth (no seam) but strong
-    enough that the dominant tile clearly wins the high-frequency band."""
-    relative = (weight / weight_max.clamp(min=1e-8)).clamp(0.0, 1.0)
-    return (relative ** 3) * (3.0 - 2.0 * relative) ** 2   # smoothstep * relative²
+# def _detail_weight(weight, weight_max):
+    # """Moderately steep competition weight: smooth (no seam) but strong
+    # enough that the dominant tile clearly wins the high-frequency band."""
+    # relative = (weight / weight_max.clamp(min=1e-8)).clamp(0.0, 1.0)
+    # return (relative ** 3) * (3.0 - 2.0 * relative) ** 2   # smoothstep * relative²
 
+def _detail_weight(weight, weight_max):
+    relative = (weight / weight_max.clamp(min=1e-8)).clamp(0.0, 1.0)
+    return relative ** 3
 
 def _tile_weight(info, feather, device, dtype):
     """2-D weight map for one tile, as the outer product of its two axis ramps."""
