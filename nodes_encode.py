@@ -45,7 +45,7 @@ def _as_string_list(v):
 
 
 class ElementTileEncode:
-    CATEGORY = "Element TileUpscale"
+    CATEGORY = "Element TileEdit"
     FUNCTION = "encode"
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
     RETURN_NAMES = ("tile_positives", "tile_negatives", "tile_latents")

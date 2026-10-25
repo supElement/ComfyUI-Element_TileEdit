@@ -23,7 +23,7 @@ class ElementStrengthSchedule:
     """MODEL -> MODEL：把逐步 reference_strength 调度挂到模型上。
     供 ElementTileSplit + 原生 KSampler 工作流使用（Split 不输出 MODEL，
     调度必须经模型 patch 进入采样）。KSampler 的 model 输入必须接本节点输出。"""
-    CATEGORY = "Element TileUpscale"
+    CATEGORY = "Element TileEdit"
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
 
@@ -46,7 +46,7 @@ class ElementStrengthSchedule:
 
 
 class ElementKrea2InContextPatch:
-    CATEGORY = "Element TileUpscale"
+    CATEGORY = "Element TileEdit"
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
 

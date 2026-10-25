@@ -62,7 +62,7 @@ def _tile_sampling_callback(previewer, steps, state):
 
 
 class TiledUpscale:
-    CATEGORY = "Element TileUpscale"
+    CATEGORY = "Element TileEdit"
     RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", GRID_TYPE)
     RETURN_NAMES = ("image", "split_images", "resampler_images", "grid")
     OUTPUT_IS_LIST = (False, True, True, False)

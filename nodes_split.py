@@ -720,7 +720,7 @@ class ElementTileSplit:
     """纯几何分块节点：画布/图层 UI 状态经 layout_data(JSON widget) 传入，
     所有几何在执行时后端全量重算校验（前端仅为预览，防陈旧数据）。"""
 
-    CATEGORY = "Element TileUpscale"
+    CATEGORY = "Element TileEdit"
     FUNCTION = "split"
     OUTPUT_NODE = True
     RETURN_TYPES = ("IMAGE", "IMAGE", "STRING", "STRING", GRID_TYPE)

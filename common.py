@@ -808,10 +808,16 @@ def _split_frequencies(image, radius):
     return low, image - low
 
 
+# def _detail_weight(weight, weight_max):
+    # """Near-exclusive blend weight for the detail band, so doubled contours cannot survive."""
+    # relative = weight / weight_max.clamp(min=1e-8)
+    # return ((relative - 1.0) * _DETAIL_SHARPNESS + 1.0).clamp(0.0, 1.0)
+
 def _detail_weight(weight, weight_max):
-    """Near-exclusive blend weight for the detail band, so doubled contours cannot survive."""
-    relative = weight / weight_max.clamp(min=1e-8)
-    return ((relative - 1.0) * _DETAIL_SHARPNESS + 1.0).clamp(0.0, 1.0)
+    """Moderately steep competition weight: smooth (no seam) but strong
+    enough that the dominant tile clearly wins the high-frequency band."""
+    relative = (weight / weight_max.clamp(min=1e-8)).clamp(0.0, 1.0)
+    return (relative ** 3) * (3.0 - 2.0 * relative) ** 2   # smoothstep * relative²
 
 
 def _tile_weight(info, feather, device, dtype):
