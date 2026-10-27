@@ -132,35 +132,10 @@ function balancedSubsplit(rects, gapMax) {
   return out;
 }
 
-/* 点是否在圆角矩形 R 内（R 为对象：{x,y,w,h,rtl,rtr,rbl,rbr}）
-   eps 为边界容差，默认 1e-6，与原 _inside 行为一致 */
-function ptInRoundedRect(x, y, R, eps = 1e-6) {
-  const rx = R.x, ry = R.y, rw = R.w, rh = R.h;
-  const rtl = R.rtl || 0, rtr = R.rtr || 0, rbl = R.rbl || 0, rbr = R.rbr || 0;
 
-  // 包围盒快速排除
-  if (x < rx - eps || x > rx + rw + eps) return false;
-  if (y < ry - eps || y > ry + rh + eps) return false;
 
-  // 四个圆角：落在对应角的正方形区域内时，用圆的方程判定
-  if (rtl > 0 && x < rx + rtl && y < ry + rtl) {
-    const dx = x - (rx + rtl), dy = y - (ry + rtl);
-    return dx * dx + dy * dy <= rtl * rtl + eps;
-  }
-  if (rtr > 0 && x > rx + rw - rtr && y < ry + rtr) {
-    const dx = x - (rx + rw - rtr), dy = y - (ry + rtr);
-    return dx * dx + dy * dy <= rtr * rtr + eps;
-  }
-  if (rbl > 0 && x < rx + rbl && y > ry + rh - rbl) {
-    const dx = x - (rx + rbl), dy = y - (ry + rh - rbl);
-    return dx * dx + dy * dy <= rbl * rbl + eps;
-  }
-  if (rbr > 0 && x > rx + rw - rbr && y > ry + rh - rbr) {
-    const dx = x - (rx + rw - rbr), dy = y - (ry + rh - rbr);
-    return dx * dx + dy * dy <= rbr * rbr + eps;
-  }
-  return true; // 不在任何角的圆角方块内，则在矩形实体区
-}
+
+
 
 // A 的实际形状（圆角矩形）是否与矩形 rect=[x,y,w,h] 有正面积交集（精确版）
 function rectIntersectsRoundedRect(rect, R) {
@@ -425,12 +400,10 @@ function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = 
     const [x, y, w, h] = A;
     const [qx, qy, qw, qh] = B;
     
-    // 1. 纵向相切（上下相邻）：x 坐标对齐，宽度相同，且上下边贴合
     const vertAlign = Math.abs(x - qx) <= eps && Math.abs(w - qw) <= eps;
     const vertTouch = Math.abs((y + h) - qy) <= eps || Math.abs((qy + qh) - y) <= eps;
     if (vertAlign && vertTouch) return true;
-    
-    // 2. 横向相切（左右相邻）：y 坐标对齐，高度相同，且左右边贴合
+
     const horzAlign = Math.abs(y - qy) <= eps && Math.abs(h - qh) <= eps;
     const horzTouch = Math.abs((x + w) - qx) <= eps || Math.abs((qx + qw) - x) <= eps;
     if (horzAlign && horzTouch) return true;
@@ -440,10 +413,13 @@ function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = 
 
   let changed = true;
   let iter = 0;
-  while (changed && iter < 60) {
+  const maxIter = 60 + pieces.length * 4;
+  while (changed && iter < maxIter) {
     changed = false;
     iter++;
-    pieces.sort((a, b) => (b[2] * b[3]) - (a[2] * a[3])); // 大块优先
+    // 碎块优先：最小块先被吸收。若改成大块优先，先合并的大块会把碎块的等长相切边吃掉
+    // （例：A 贴右边缘时残留块高度=行高，左列先纵向合成 2 行高的大块后，残留块再也无法合并）
+    pieces.sort((a, b) => (a[2] * a[3]) - (b[2] * b[3]));
 
     for (let i = 0; i < pieces.length; i++) {
       if (!pieces[i]) continue;
@@ -463,54 +439,62 @@ function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = 
         const nx = Math.min(x, qx), ny = Math.min(y, qy);
         const nxEnd = Math.max(x + w, qx + qw);
         const nyEnd = Math.max(y + h, qy + qh);
+        
+        // 直接合并（允许包围盒吃掉 A 的倒角外侧留白）
         pieces[i] = [nx, ny, nxEnd - nx, nyEnd - ny];
         pieces[bestJ] = null;
         changed = true;
-        break; // 重新排序、重新扫描（避免累积尺寸问题）
+        break; 
       }
 
-      // ---- 2. 没邻居可吞，且自己细长时，向外部变胖 ----
+      // ---- 2. 细长块：向 A 外变胖。画布被背景块铺满，扩张必然会碰到邻居，
+      //         因此规则是"相交的邻居必须能被整块吞并"，否则换候选，绝不产生重叠/空洞 ----
       if (Math.max(w, h) / Math.max(1, Math.min(w, h)) > 5.0) {
         let targetW = w, targetH = h;
         if (w > h) targetH = Math.ceil(w / 5.0);
         else       targetW = Math.ceil(h / 5.0);
 
-        let bx = x, by = y, bw = w, bh = h;
-
+        const cands = [];
         if (targetH > h) {
           const diff  = targetH - h;
           const safeT = getSafeExpand([x, y, w, h], 'top', Math.min(diff, y), regions);
           const safeB = getSafeExpand([x, y - safeT, w, h + safeT], 'bottom',
                                       Math.min(diff - safeT, outH - (y + h)), regions);
-          by = y - safeT;
-          bh = h + safeT + safeB;
-        }
-
-        if (targetW > w) {
+          if (safeT + safeB > 0) cands.push([x, y - safeT, w, h + safeT + safeB]);
+          if (safeT > 0) cands.push([x, y - safeT, w, h + safeT]);
+          if (safeB > 0) cands.push([x, y, w, h + safeB]);
+        } else if (targetW > w) {
           const diff  = targetW - w;
-          // ★ 用已经变过胖的 [bx,by,bw,bh]，而不是旧 x,y,w,h
-          const safeL = getSafeExpand([bx, by, bw, bh], 'left',
-                                      Math.min(diff, bx), regions);
-          const safeR = getSafeExpand([bx - safeL, by, bw + safeL, bh], 'right',
-                                      Math.min(diff - safeL, outW - (bx + bw)), regions);
-          bx = bx - safeL;
-          bw = bw + safeL + safeR;
+          const safeL = getSafeExpand([x, y, w, h], 'left', Math.min(diff, x), regions);
+          const safeR = getSafeExpand([x - safeL, y, w + safeL, h], 'right',
+                                      Math.min(diff - safeL, outW - (x + w)), regions);
+          if (safeL + safeR > 0) cands.push([x - safeL, y, w + safeL + safeR, h]);
+          if (safeL > 0) cands.push([x - safeL, y, w + safeL, h]);
+          if (safeR > 0) cands.push([x, y, w + safeR, h]);
         }
 
-        let overlapsNeighbor = false;
-        for (let j = 0; j < pieces.length; j++) {
-          if (i === j || !pieces[j]) continue;
-          const [qx, qy, qw, qh] = pieces[j];
-          const ix  = Math.max(bx, qx),      iy  = Math.max(by, qy);
-          const ix2 = Math.min(bx + bw, qx + qw), iy2 = Math.min(by + bh, qy + qh);
-          if (ix < ix2 - 0.1 && iy < iy2 - 0.1) { overlapsNeighbor = true; break; }
-        }
-
-        if (!overlapsNeighbor && (bx !== x || by !== y || bw !== w || bh !== h)) {
+        let fattened = false;
+        for (const [bx, by, bw, bh] of cands) {
+          const swallow = [];
+          let ok = true;
+          for (let j = 0; j < pieces.length; j++) {
+            if (i === j || !pieces[j]) continue;
+            const [qx, qy, qw, qh] = pieces[j];
+            const ix  = Math.max(bx, qx),      iy  = Math.max(by, qy);
+            const ix2 = Math.min(bx + bw, qx + qw), iy2 = Math.min(by + bh, qy + qh);
+            if (ix >= ix2 - 0.1 || iy >= iy2 - 0.1) continue;
+            if (qx < bx - 0.1 || qy < by - 0.1 ||
+                qx + qw > bx + bw + 0.1 || qy + qh > by + bh + 0.1) { ok = false; break; }
+            swallow.push(j);
+          }
+          if (!ok) continue;
           pieces[i] = [bx, by, bw, bh];
+          for (const j of swallow) pieces[j] = null;
           changed = true;
+          fattened = true;
           break;
         }
+        if (fattened) break;
       }
     }
     if (changed) pieces = pieces.filter(p => p !== null);
@@ -518,11 +502,13 @@ function planGaps(covered, div, outW, outH, gapMax, regions = [], targetTiles = 
 
   let finalPieces = [];
   for (const p of pieces) {
-    if (p[2] > gapMax || p[3] > gapMax) {
-      balancedSubsplit([{ x: p[0], y: p[1], w: p[2], h: p[3] }], gapMax)
+    // 与后端一致：切点可能是圆弧浮点坐标，最终统一取整（Math.round = floor(v+0.5)）
+    const pi = [Math.round(p[0]), Math.round(p[1]), Math.round(p[2]), Math.round(p[3])];
+    if (pi[2] > gapMax || pi[3] > gapMax) {
+      balancedSubsplit([{ x: pi[0], y: pi[1], w: pi[2], h: pi[3] }], gapMax)
         .forEach(sub => finalPieces.push([sub.x, sub.y, sub.w, sub.h]));
     } else {
-      finalPieces.push(p);
+      finalPieces.push(pi);
     }
   }
 
