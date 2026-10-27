@@ -253,28 +253,34 @@ def _snap(v, step):
     return int(round(float(v) / step)) * step
 
 
+def _round_js(v):
+    return int(math.floor(v + 0.5))
+
+
 def _balanced_subsplit(rects, gap_max_px):
     """超 gap_max 的块做内部均衡切分（选子块长宽比最接近 1 的方案）。"""
     out = []
     for (rx, ry, rw, rh) in rects:
         if rw <= gap_max_px and rh <= gap_max_px:
             out.append((rx, ry, rw, rh)); continue
-        max_sc = max(1, -(-rw // gap_max_px)); max_sr = max(1, -(-rh // gap_max_px))
+        max_sc = max(1, math.ceil(rw / gap_max_px)); max_sr = max(1, math.ceil(rh / gap_max_px))
         best = None
         for sc in range(1, max_sc + 1):
-            sw = -(-rw // sc)
+            sw = math.ceil(rw / sc)
             if sw > gap_max_px: continue
             for sr in range(1, max_sr + 1):
-                sh = -(-rh // sr)
+                sh = math.ceil(rh / sr)
                 if sh > gap_max_px: continue
                 a = max(sw, sh) / max(1, min(sw, sh))
                 if best is None or a < best[0]: best = (a, sc, sr)
         sc, sr = (max_sc, max_sr) if best is None else (best[1], best[2])
-        sw, sh = -(-rw // sc), -(-rh // sr)
         for i in range(sc):
+            x0 = rx + _round_js(i * rw / sc)
+            x1 = rx + _round_js((i + 1) * rw / sc)
             for j in range(sr):
-                nx, ny = rx + i * sw, ry + j * sh
-                out.append((nx, ny, min(sw, rx + rw - nx), min(sh, ry + rh - ny)))
+                y0 = ry + _round_js(j * rh / sr)
+                y1 = ry + _round_js((j + 1) * rh / sr)
+                out.append((x0, y0, x1 - x0, y1 - y0))
     return out
 
 # ================================================================
@@ -515,7 +521,7 @@ def _can_merge(A, B, eps=5.0):
 
 def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
                     regions=None, target_tiles=GAP_TARGET_TILES):
-    """与前端 planGaps 逐位镜像：均分 → 单刀切割 → 大块吞最小碎块 → 变胖 → 超尺寸平分。"""
+    """与前端 planGaps 逐位镜像：均分 → 单刀切割 → 合并 → 变胖 → 超尺寸平分。"""
     if regions is None:
         regions = []
 
@@ -525,7 +531,6 @@ def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
 
     base_grid = _balanced_subsplit([(0, 0, out_w, out_h)], gap_max_px)
 
-    # 1) 均分 + 手绘框单刀切割（subtractSingleCut 镜像）
     pieces = []
     for b in base_grid:
         parts = [b]
@@ -544,20 +549,19 @@ def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
                 break
         pieces.extend(parts)
 
-    # 2) 合并循环：每次只吞一个"面积最小的可合并邻居"，吞完立即重排、重扫
     changed = True
     iter_count = 0
-    while changed and iter_count < 60:
+    max_iter = 60 + len(pieces) * 4
+    while changed and iter_count < max_iter:
         changed = False
         iter_count += 1
-        pieces.sort(key=lambda p: -(p[2] * p[3]))  # 大块优先
+        pieces.sort(key=lambda p: p[2] * p[3])
 
         for i in range(len(pieces)):
             if pieces[i] is None:
                 continue
             x, y, w, h = pieces[i]
 
-            # ---- 2a. 收集可合并邻居，挑面积最小的吞 ----
             best_j = -1
             best_area = float("inf")
             for j in range(len(pieces)):
@@ -578,9 +582,8 @@ def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
                 pieces[i] = (nx, ny, nx_end - nx, ny_end - ny)
                 pieces[best_j] = None
                 changed = True
-                break  # 重新排序、重新扫描，避免累积尺寸问题
+                break
 
-            # ---- 2b. 无邻居可吞，且自身细长时向 A 外变胖 ----
             if max(w, h) / max(1, min(w, h)) > 5.0:
                 target_w, target_h = w, h
                 if w > h:
@@ -588,51 +591,67 @@ def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
                 else:
                     target_w = math.ceil(h / 5.0)
 
-                bx, by, bw, bh = x, y, w, h
-
+                cands = []
                 if target_h > h:
                     diff = target_h - h
                     safe_t = _get_safe_expand((x, y, w, h), 'top',
                                               min(diff, y), regions)
                     safe_b = _get_safe_expand((x, y - safe_t, w, h + safe_t), 'bottom',
                                               min(diff - safe_t, out_h - (y + h)), regions)
-                    by = y - safe_t
-                    bh = h + safe_t + safe_b
-
-                if target_w > w:
+                    if safe_t + safe_b > 0:
+                        cands.append((x, y - safe_t, w, h + safe_t + safe_b))
+                    if safe_t > 0:
+                        cands.append((x, y - safe_t, w, h + safe_t))
+                    if safe_b > 0:
+                        cands.append((x, y, w, h + safe_b))
+                elif target_w > w:
                     diff = target_w - w
-                    # 用变胖后的 [bx,by,bw,bh] 再做右向探测
-                    safe_l = _get_safe_expand((bx, by, bw, bh), 'left',
-                                              min(diff, bx), regions)
-                    safe_r = _get_safe_expand((bx - safe_l, by, bw + safe_l, bh), 'right',
-                                              min(diff - safe_l, out_w - (bx + bw)), regions)
-                    bx = bx - safe_l
-                    bw = bw + safe_l + safe_r
+                    safe_l = _get_safe_expand((x, y, w, h), 'left',
+                                              min(diff, x), regions)
+                    safe_r = _get_safe_expand((x - safe_l, y, w + safe_l, h), 'right',
+                                              min(diff - safe_l, out_w - (x + w)), regions)
+                    if safe_l + safe_r > 0:
+                        cands.append((x - safe_l, y, w + safe_l + safe_r, h))
+                    if safe_l > 0:
+                        cands.append((x - safe_l, y, w + safe_l, h))
+                    if safe_r > 0:
+                        cands.append((x, y, w + safe_r, h))
 
-                overlaps_neighbor = False
-                for j in range(len(pieces)):
-                    if i == j or pieces[j] is None:
+                fattened = False
+                for bx, by, bw, bh in cands:
+                    swallow = []
+                    ok = True
+                    for j in range(len(pieces)):
+                        if i == j or pieces[j] is None:
+                            continue
+                        qx, qy, qw, qh = pieces[j]
+                        ix = max(bx, qx); iy = max(by, qy)
+                        ix2 = min(bx + bw, qx + qw); iy2 = min(by + bh, qy + qh)
+                        if ix >= ix2 - 0.1 or iy >= iy2 - 0.1:
+                            continue
+                        if (qx < bx - 0.1 or qy < by - 0.1 or
+                                qx + qw > bx + bw + 0.1 or qy + qh > by + bh + 0.1):
+                            ok = False
+                            break
+                        swallow.append(j)
+                    if not ok:
                         continue
-                    qx, qy, qw, qh = pieces[j]
-                    ix = max(bx, qx); iy = max(by, qy)
-                    ix2 = min(bx + bw, qx + qw); iy2 = min(by + bh, qy + qh)
-                    if ix < ix2 - 0.1 and iy < iy2 - 0.1:
-                        overlaps_neighbor = True
-                        break
-
-                if (not overlaps_neighbor) and (bx != x or by != y or bw != w or bh != h):
                     pieces[i] = (bx, by, bw, bh)
+                    for j in swallow:
+                        pieces[j] = None
                     changed = True
+                    fattened = True
+                    break
+                if fattened:
                     break
 
         if changed:
             pieces = [p for p in pieces if p is not None]
 
-    # 3) 超 gap_max 的块做均衡切分，同时把 float 坐标收敛成 int 以防 _balanced_subsplit 报错
     final_pieces = []
     for p in pieces:
-        p_int = (int(round(p[0])), int(round(p[1])),
-                 int(round(p[2])), int(round(p[3])))
+        p_int = (_round_js(p[0]), _round_js(p[1]),
+                 _round_js(p[2]), _round_js(p[3]))
         if p_int[2] > gap_max_px or p_int[3] > gap_max_px:
             final_pieces.extend(_balanced_subsplit([p_int], gap_max_px))
         else:
