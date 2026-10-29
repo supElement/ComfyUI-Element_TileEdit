@@ -204,9 +204,10 @@ class TiledUpscale:
         positive = clip.encode_from_tokens_scheduled(clip.tokenize(prompt))
         negative = clip.encode_from_tokens_scheduled(clip.tokenize(negative_prompt))
         alignment = _pixel_alignment(model)
-        strength_values = _parse_strength_schedule(reference_strength)  
+        strength_values = _parse_strength_schedule(reference_strength)
+        krea2 = _is_krea2(model.get_model_object("diffusion_model"))
 
-        if reference_mode and not _is_krea2(model.get_model_object("diffusion_model")):
+        if reference_mode and not krea2:
             logging.warning("[TiledUpscale] reference_mode (Krea 2 identity-edit) only applies "
                             "to Krea 2; this model already consumes each tile as a native "
                             "reference latent — falling back to the conditioning path.")
@@ -312,7 +313,7 @@ class TiledUpscale:
                     pos_c, neg_c = _grounded_reference_conditioning(
                         clip, prompt, vae, crop, grounding_px, reference_method,
                         encode_negative=(cfg > 1.0), qwen21=qwen21,
-                        negative_prompt=negative_prompt)                                
+                        negative_prompt=negative_prompt, krea2=krea2)
                     tile_positive.append(pos_c)
                     if cfg > 1.0:
                         tile_negative.append(neg_c)

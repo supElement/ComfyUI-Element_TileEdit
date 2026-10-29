@@ -20,9 +20,12 @@ from .common import (
     _is_flux2_family,
     _is_moss_image,
     _is_krea2,
+    _has_krea2_in_context_patch,
+    _strip_owned_patches,
     _grounded_reference_conditioning,
     _grounded_conditioning,
 )
+from .nodes_patch import _in_context_model_from_conditioning
 
 
 def _unwrap(value, default=None):
@@ -47,9 +50,9 @@ def _as_string_list(v):
 class ElementTileEncode:
     CATEGORY = "Element TileEdit"
     FUNCTION = "encode"
-    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
-    RETURN_NAMES = ("tile_positives", "tile_negatives", "tile_latents")
-    OUTPUT_IS_LIST = (True, True, True)
+    RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "LATENT")
+    RETURN_NAMES = ("model", "tile_positives", "tile_negatives", "tile_latents")
+    OUTPUT_IS_LIST = (False, True, True, True)
     INPUT_IS_LIST = True
 
     @classmethod
@@ -99,13 +102,15 @@ class ElementTileEncode:
 
         alignment = _pixel_alignment(model)
 
-        if reference_mode and not _is_krea2(model.get_model_object("diffusion_model")):
+        krea2 = _is_krea2(model.get_model_object("diffusion_model"))
+        has_in_context_patch = krea2 and _has_krea2_in_context_patch(model)
+        in_context = krea2 and (reference_mode or has_in_context_patch)
+        if reference_mode and not krea2:
             logging.warning("[TileEncode] reference_mode is Krea 2 identity-edit only; "
                             "falling back to the conditioning path (pair with "
                             "ElementStrengthSchedule for per-step reference control).")
-            reference_mode = False
 
-        if reference_mode:
+        if in_context:
             mode = "in_context"
             grounded, reference_method = False, None
         else:
@@ -160,8 +165,8 @@ class ElementTileEncode:
                 pos, neg = _grounded_reference_conditioning(
                     clip, p, vae, crop, grounding_px,
                     reference_method=reference_method, encode_negative=True,
-                    qwen21=qwen21, negative_prompt=ng)
-            elif reference_mode:
+                    qwen21=qwen21, negative_prompt=ng, krea2=krea2)
+            elif in_context:
                 ref_latent = vae.encode(crop)
                 extra = {"reference_latents": [ref_latent],
                          "reference_latents_method": "index_timestep_zero"}
@@ -185,4 +190,9 @@ class ElementTileEncode:
             tile_neg.append(neg)
             pbar.update_absolute(idx + 1, n)
 
-        return (tile_pos, tile_neg, tile_latents)
+        if in_context and not has_in_context_patch:
+            model = _strip_owned_patches(model, keys=("tiled_upscale_in_context_cond",
+                                                      "tiled_upscale_in_context"))
+            model = _in_context_model_from_conditioning(model)
+
+        return (model, tile_pos, tile_neg, tile_latents)

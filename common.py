@@ -453,6 +453,30 @@ def _is_krea2(diffusion_model):
     return all(hasattr(diffusion_model, part) for part in _KREA2_PARTS)
 
 
+_IN_CONTEXT_WRAPPER_KEYS = ("tiled_upscale_in_context_cond", "tiled_upscale_in_context")
+
+
+def _has_krea2_in_context_patch(model):
+    """ElementKrea2InContextPatch 是否已挂在这个 MODEL 上。
+
+    检测面：extra_conds object patch 的标记，或 DIFFUSION_MODEL wrapper key。
+    ModelPatcher.clone() 浅拷 object_patches、深拷 model_options，因此模型
+    穿过 ElementStrengthSchedule 等节点之后标记仍然可见。"""
+    try:
+        fn = model.object_patches.get("extra_conds")
+    except Exception:
+        fn = None
+    if getattr(fn, "_element_krea2_extra_conds", False):
+        return True
+    try:
+        options = model.model_options.get("transformer_options") or {}
+        wrappers = options.get("wrappers") or {}
+        dm = wrappers.get(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL) or {}
+    except Exception:
+        return False
+    return any(key in dm for key in _IN_CONTEXT_WRAPPER_KEYS)
+
+
 def _img_ids(batch, frame, h, w, device):
     """3-axis RoPE ids for one image block: axis 0 is the frame index, axes 1-2 the grid."""
     ids = torch.zeros(h, w, 3, device=device, dtype=torch.float32)
@@ -587,10 +611,17 @@ def _grounded_conditioning(clip, prompt, image, grounding_px):
 
 def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_px,
                                      reference_method=None, encode_negative=False, qwen21=False,
-                                     global_pixels=None, global_ref_latent=None, negative_prompt=""):
+                                     global_pixels=None, global_ref_latent=None, negative_prompt="",
+                                     krea2=False):
     samples = tile_pixels[:1].movedim(-1, 1)
     dual = global_pixels is not None and global_ref_latent is not None
-    if qwen21:
+    if krea2:
+        # Krea 2 的训练配方是 Qwen3-VL + _GROUNDING_TEMPLATE（Describe the image...）
+        # 且 vision 按最长边截断；不能套 2509 的 "Picture 1:" + 384² 面积桶。
+        ref_latents = [vae.encode(tile_pixels[:1])]
+        positive = _grounded_conditioning(clip, prompt, tile_pixels, grounding_px)
+        images = None
+    elif qwen21:
         s = tile_pixels[:1]
         t_rgb = s[:, :, :, :3]
         if s.shape[-1] > 3:
@@ -630,8 +661,11 @@ def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_p
     positive = node_helpers.conditioning_set_values(positive, extra, append=True)
     negative = None
     if encode_negative:
-        negative = clip.encode_from_tokens_scheduled(
-            clip.tokenize(negative_prompt or "", images=images, prevent_empty_text=True))
+        if krea2:
+            negative = _grounded_conditioning(clip, negative_prompt, tile_pixels, grounding_px)
+        else:
+            negative = clip.encode_from_tokens_scheduled(
+                clip.tokenize(negative_prompt or "", images=images, prevent_empty_text=True))
         negative = node_helpers.conditioning_set_values(negative, extra, append=True)
 
     def _to_cpu_deep(v):
