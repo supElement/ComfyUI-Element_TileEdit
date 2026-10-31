@@ -670,7 +670,7 @@ class ElementTileMerge:
                 "feather": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "color_match_strength": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "color_protection": ("BOOLEAN", {"default": False,
-                    "label_on": "true", "label_off": "flase",
+                    "label_on": "true", "label_off": "false",
                     "tooltip": "On: compare each tile against its source and only damp color matching where the pixels were intentionally recolored, "
                                "so hand-painted hue/color edits survive while exposure fixes still apply. "
                                "Off: color match every tile as usual."}),
