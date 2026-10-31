@@ -238,6 +238,8 @@ Stitches each tile's generated result back onto the canvas using `grid`.
 |---|---|---|---|---|
 | `feather` | FLOAT 0–1 | 1.0 | Feathering strength. | Uses smoothstep curve, not linear. `0` ≈ no feathering, seams will be hard. |
 | `color_match_strength` | FLOAT 0–1 | 0.0 | Color matching strength. | **Only triggers when > 0**, and only truly works when **`tile_sources` is also connected**. Statistics use **low-weight edge pixels** (< 0.8) to avoid washing out center content. |
+| `color_protection` | BOOLEAN | False | Hue/Color Protection | When enabled, each tile is compared against its source content; color-matching adjustments are applied only to pixels that have been intentionally recolored. This preserves manual hue or color modifications while ensuring that exposure corrections remain effective. When disabled, color matching is applied to each tile as usual. |
+| `high_low_freq` | ​​BOOLEAN | False | High/Low-Frequency Blending (applies only to feathered regions) | Uses "feathered" weighting for low-frequency components to ensure smooth transitions, while employing "competitive" weighting for high-frequency components to preserve fine details—preventing details in overlapping areas from being lost due to averaging. |
 
 ### Merge Algorithm
 
