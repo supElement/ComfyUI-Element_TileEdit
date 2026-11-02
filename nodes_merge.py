@@ -291,6 +291,8 @@ def _estimate_common_lab_shift(triples):
             continue
         gen = _resize_hwc(_as_batch_hwc(generated).float()[..., :3], _ANALYSIS_MAX_EDGE)
         ref = _resize_hwc(_as_batch_hwc(reference).float()[..., :3], _ANALYSIS_MAX_EDGE)
+        # 两侧设备可能不同: split 参考块跟随输入设备(GPU), VAE 解码块默认在中间设备(CPU)
+        ref = ref.to(device=gen.device, dtype=gen.dtype)
         if gen.shape[1:3] != ref.shape[1:3]:
             ref = _fit_hwc(ref, gen.shape[1], gen.shape[2])
         diff = _rgb_to_lab(ref) - _rgb_to_lab(gen)
@@ -329,6 +331,8 @@ def _estimate_protected_lab_shift(triples):
             continue
         gen = _resize_hwc(_as_batch_hwc(generated).float()[..., :3], _ANALYSIS_MAX_EDGE)
         ref = _resize_hwc(_as_batch_hwc(reference).float()[..., :3], _ANALYSIS_MAX_EDGE)
+        # 两侧设备可能不同: split 参考块跟随输入设备(GPU), VAE 解码块默认在中间设备(CPU)
+        ref = ref.to(device=gen.device, dtype=gen.dtype)
         if ref.shape[1:3] != gen.shape[1:3]:
             ref = _fit_hwc(ref, gen.shape[1], gen.shape[2])
         m = _tile_mask_2d(info)
