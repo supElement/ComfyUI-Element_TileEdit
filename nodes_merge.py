@@ -659,6 +659,29 @@ def _generate_tile_mask(w, h, rtl, rtr, rbl, rbr, device, dtype):
     return mask.float().unsqueeze(0).unsqueeze(-1).to(dtype)
 
 
+def _apply_edit_mask(weight, info, device, dtype):
+    """乘上 split 的锁边 edit_mask：锁边带权重清零，合并时只取真正重绘过的内容。"""
+    edit_mask = info.get("edit_mask")
+    if edit_mask is None:
+        return weight
+    if not torch.is_tensor(edit_mask):
+        return weight
+    w_h, w_w = weight.shape[1], weight.shape[2]
+    edit_mask = edit_mask.to(device=device, dtype=dtype)
+    if edit_mask.ndim == 3:
+        edit_mask = edit_mask[:1].unsqueeze(-1)
+    elif edit_mask.ndim == 2:
+        edit_mask = edit_mask[None, :, :, None]
+    else:
+        edit_mask = edit_mask[:1]
+        if edit_mask.shape[-1] != 1:
+            edit_mask = edit_mask[..., :1]
+    if edit_mask.shape[1] != w_h or edit_mask.shape[2] != w_w:
+        edit_mask = F.interpolate(edit_mask.permute(0, 3, 1, 2), size=(w_h, w_w),
+                                  mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
+    return weight * edit_mask.clamp(0.0, 1.0)
+
+
 class ElementTileMerge:
     CATEGORY = "Element TileEdit"
     RETURN_TYPES = ("IMAGE",)
@@ -671,7 +694,10 @@ class ElementTileMerge:
             "required": {
                 "tile_images": ("IMAGE",),
                 "grid": (GRID_TYPE,),
-                "feather": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "feather": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Transition width as a fraction of the overlap, centered on the overlap midline: "
+                               "0 = hard switch exactly at the midline, 0.5 = only the middle half of the overlap blends, "
+                               "1 = the whole overlap blends."}),
                 "color_match_strength": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "color_protection": ("BOOLEAN", {"default": False,
                     "label_on": "true", "label_off": "false",
@@ -750,7 +776,8 @@ class ElementTileMerge:
                     if info_wm_copy.get("fade_bottom", 0) > 0: info_wm_copy["fade_bottom"] = overlap
                     if info_wm_copy.get("fade_left", 0) > 0:   info_wm_copy["fade_left"]   = overlap
                     if info_wm_copy.get("fade_right", 0) > 0:  info_wm_copy["fade_right"]  = overlap
-                w_full = _tile_weight(info_wm_copy, feather, device, dtype)
+                w_full = _tile_weight(info_wm_copy, feather, device, dtype, centered=True)
+                w_full = _apply_edit_mask(w_full, info_wm, device, dtype)
                 xw, yw = info_wm["x"], info_wm["y"]
                 ww, hw = info_wm["width"], info_wm["height"]
                 x0, y0 = max(0, xw), max(0, yw)
@@ -814,7 +841,8 @@ class ElementTileMerge:
                 if info.get("fade_left", 0) > 0:   info["fade_left"] = overlap
                 if info.get("fade_right", 0) > 0:  info["fade_right"] = overlap
                 
-            weight = _tile_weight(info, feather, device, dtype)
+            weight = _tile_weight(info, feather, device, dtype, centered=True)
+            weight = _apply_edit_mask(weight, info, device, dtype)
 
             # 3. 获取 split 传过来的像素级 Mask
             is_fg = info.get("kind") not in {"gap", "fallback", "unified"}

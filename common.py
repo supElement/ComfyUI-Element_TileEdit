@@ -827,11 +827,48 @@ def _detail_weight(weight, weight_max):
     relative = (weight / weight_max.clamp(min=1e-8)).clamp(0.0, 1.0)
     return relative ** 3
 
-def _tile_weight(info, feather, device, dtype):
-    """2-D weight map for one tile, as the outer product of its two axis ramps."""
-    ramp_y = _axis_ramp(info["height"], round(info["fade_top"] * feather), round(info["fade_bottom"] * feather), device, dtype)
-    ramp_x = _axis_ramp(info["width"], round(info["fade_left"] * feather), round(info["fade_right"] * feather), device, dtype)
+def _tile_weight(info, feather, device, dtype, centered=False):
+    """2-D weight map for one tile, as the outer product of its two axis ramps.
+
+    centered=False: fade 从分块边缘就开始，宽度 = fade × feather（旧行为）。
+    centered=True : 过渡带以重叠区中线为中心，宽度 = fade × feather；
+                    feather=1 时铺满整个重叠区，feather=0 时正好在中线硬切。
+    """
+    if centered:
+        ramp_y = _centered_axis_ramp(info["height"], info["fade_top"], info["fade_bottom"], feather, device, dtype)
+        ramp_x = _centered_axis_ramp(info["width"], info["fade_left"], info["fade_right"], feather, device, dtype)
+    else:
+        ramp_y = _axis_ramp(info["height"], round(info["fade_top"] * feather), round(info["fade_bottom"] * feather), device, dtype)
+        ramp_x = _axis_ramp(info["width"], round(info["fade_left"] * feather), round(info["fade_right"] * feather), device, dtype)
     return (ramp_y.unsqueeze(1) * ramp_x.unsqueeze(0)).unsqueeze(0).unsqueeze(-1)
+
+
+def _centered_axis_ramp(size, fade_start, fade_end, feather, device, dtype):
+    """1-D 权重：两侧过渡带都以重叠区中线为中心，宽度 = fade × feather。
+
+    以右侧边为例，令 d = 到该边的距离：d < (fade-w)/2 时权重 0，随后在宽度 w 内
+    升到 1，再往里恒为 1。相邻两块同宽互补，重叠区内权重之和恰为 1。
+    """
+    if fade_start + fade_end > size:
+        scale = size / (fade_start + fade_end)
+        fade_start = int(fade_start * scale)
+        fade_end = int(fade_end * scale)
+
+    f = max(0.0, min(1.0, float(feather)))
+    idx = torch.arange(size, device=device, dtype=torch.float32)
+
+    def side(fade, flipped):
+        if fade <= 0:
+            return torch.ones(size, device=device, dtype=dtype)
+        d = (size - 1 - idx) if flipped else idx
+        w = fade * f
+        off = (fade - w) * 0.5
+        if w <= 1e-6:
+            return (d >= off).to(dtype)
+        t = ((d - off) / w).clamp(0.0, 1.0)
+        return (t * t * (3.0 - 2.0 * t)).to(dtype)
+
+    return side(fade_start, False) * side(fade_end, True)
 
 
 def _resolve_geometry(width, height, tile_size, overlap, alignment):

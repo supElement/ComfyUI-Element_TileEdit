@@ -122,8 +122,8 @@ def _norm_layers(data):
 def _overlap_px(mode, px_val, pct_val, tile_edge):
     """by px / by % 开关式二选一；% 基准 = 该层 tile 边长（输出空间）。"""
     if mode == "pct":
-        return int(round(_clamp(float(pct_val), 0.0, 45.0) / 100.0 * tile_edge))
-    return _clamp(int(px_val or 0), 0, max(0, int(tile_edge) // 2))
+        return int(round(max(0.0, float(pct_val)) / 100.0 * tile_edge))
+    return max(0, int(px_val or 0))
 
 def _inject_manual_overlap(tiles, default_ov, out_w, out_h):
     """对所有块（手绘框和背景块）强制向外扩展 default_ov/2。
@@ -210,6 +210,36 @@ def _compute_manual_fades(tiles, default_ov, out_w, out_h):
         if t["y"] + t["height"] >= out_h:
             t["fade_bottom"] = 0
 
+def _lock_band_mask(gen_w, gen_h, bands, feather):
+    """锁边 mask：[1,h,w]，1 = 允许重绘，0 = 只作参考。
+    bands = (left, top, right, bottom)，锁定带宽度（<=0 表示该边不锁）。
+    feather 可为标量或 (left, top, right, bottom)：锁定带内恒为 0，羽化全部落在带外
+    [band, band+feather]；feather <= 0 时是硬边。"""
+    gw, gh = max(1, int(gen_w)), max(1, int(gen_h))
+    if max(bands) <= 0:
+        return torch.ones((1, 1, 1), dtype=torch.float32)
+    if isinstance(feather, (tuple, list)):
+        fe = tuple(max(0.0, float(f)) for f in feather)
+    else:
+        fe = (max(0.0, float(feather)),) * 4
+
+    def _ramp(dist, band, f):
+        if band <= 0:
+            return None
+        if f <= 0.0:
+            return (dist >= band).to(torch.float32)
+        t = ((dist - band) / f).clamp(0.0, 1.0)
+        return t * t * (3.0 - 2.0 * t)
+
+    xs = torch.arange(gw, dtype=torch.float32) + 0.5
+    ys = torch.arange(gh, dtype=torch.float32) + 0.5
+    mxs = [r for r in (_ramp(xs, bands[0], fe[0]), _ramp(gw - xs, bands[2], fe[2])) if r is not None]
+    mys = [r for r in (_ramp(ys, bands[1], fe[1]), _ramp(gh - ys, bands[3], fe[3])) if r is not None]
+    mx = torch.ones(gw) if not mxs else (mxs[0] if len(mxs) == 1 else torch.minimum(mxs[0], mxs[1]))
+    my = torch.ones(gh) if not mys else (mys[0] if len(mys) == 1 else torch.minimum(mys[0], mys[1]))
+    return torch.minimum(my[:, None], mx[None, :]).unsqueeze(0)
+
+
 # ---------------------------------------------------------------- 几何切分
 
 def _split_region(x, y, w, h, cols, rows, ov):
@@ -223,6 +253,7 @@ def _split_region(x, y, w, h, cols, rows, ov):
     def _axis(total, n, o):
         if n == 1:
             return [(0, total)]
+        o = min(o, total)  # 极端 overlap 下保持 step >= 0
         cw = max(1, int(math.floor((total + o * (n - 1)) / n + 0.5)))
         step = (total - cw) / (n - 1)
         out = []
@@ -742,9 +773,9 @@ class ElementTileSplit:
     CATEGORY = "Element TileEdit"
     FUNCTION = "split"
     OUTPUT_NODE = True
-    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING", "STRING", GRID_TYPE)
-    RETURN_NAMES = ("split_images", "original_image", "prompt", "negative_prompt", "grid")
-    OUTPUT_IS_LIST = (True, False, True, True, False)
+    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING", "STRING", GRID_TYPE, "MASK")
+    RETURN_NAMES = ("split_images", "original_image", "prompt", "negative_prompt", "grid", "tile_masks")
+    OUTPUT_IS_LIST = (True, False, True, True, False, True)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -782,6 +813,9 @@ class ElementTileSplit:
         g_neg = str(data.get("global_negative", "") or "")
         g_append = bool(data.get("global_append", True))
         enable_lup = bool(data.get("enable_layer_upscale", False))
+        enable_mask = bool(data.get("enable_mask", False))
+        mask_band_pct = _clamp(float(data.get("edge_mask_pct", 90) or 0), 0.0, 100.0)
+        mask_feather = max(0.0, float(data.get("edge_mask_feather", 24) or 0))
         layers = _norm_layers(data)
 
         source = _load_source_image(data, image)
@@ -897,7 +931,7 @@ class ElementTileSplit:
             if ov_mode == "px":
                 default_ov = max(0, int(ov_px or 0))
             else:
-                default_ov = int(round(min(out_w, out_h) * (_clamp(float(ov_pct), 0.0, 45.0) / 100.0)))
+                default_ov = int(round(min(out_w, out_h) * (max(0.0, float(ov_pct)) / 100.0)))
 
             if fill_gaps and covered is not None:
                 rg_list = [rg for _, rg in layer_regions]
@@ -946,7 +980,8 @@ class ElementTileSplit:
             grid_overlap = max(ov_values) if ov_values else 0
 
         pbar = comfy.utils.ProgressBar(len(tiles))
-        tile_images, grid_tiles = [], []
+        tile_images, grid_tiles, tile_masks = [], [], []
+        mask_clamped = False
         for idx, t in enumerate(tiles):
             tx = max(0, min(t["x"], out_w - 1))
             ty = max(0, min(t["y"], out_h - 1))
@@ -968,7 +1003,42 @@ class ElementTileSplit:
                     crop.permute(0, 3, 1, 2), gen_w, gen_h, method, "disabled"
                 ).permute(0, 2, 3, 1).contiguous()
             tile_images.append(crop)
-            
+
+            # 锁边 denoise mask：只锁有邻居的边，带宽 = grid_overlap/2 × 比例
+            tile_edit_mask = None
+            if enable_mask and mask_band_pct > 0.0 and grid_overlap > 0:
+                half_band = grid_overlap * 0.5 * (mask_band_pct / 100.0)
+                bands_c = (
+                    min(half_band, tw * 0.45) if t.get("fade_left", 0) > 0 else 0.0,
+                    min(half_band, th * 0.45) if t.get("fade_top", 0) > 0 else 0.0,
+                    min(half_band, tw * 0.45) if t.get("fade_right", 0) > 0 else 0.0,
+                    min(half_band, th * 0.45) if t.get("fade_bottom", 0) > 0 else 0.0,
+                )
+                # 采样 mask：锁定带不重绘，羽化落在带外
+                sx = gen_w / max(1, tw)
+                sy = gen_h / max(1, th)
+                bands_g = (bands_c[0] * sx, bands_c[1] * sy, bands_c[2] * sx, bands_c[3] * sy)
+                tile_masks.append(_lock_band_mask(gen_w, gen_h, bands_g,
+                                                 mask_feather * (sx + sy) * 0.5))
+                # 合并 mask：锁定带 + 羽化整段剔除（这段要么没重绘，要么只被部分重绘）。
+                # 相邻两块在同一 overlap 内各剔一侧，两侧剔除宽度相加不能超过重叠宽度，
+                # 否则中间会出现无人认领的黑缝；每边最多剔到 overlap/2-1。
+                # 剔除边界处的内容已经完全重绘，硬切即可，过渡交给 Merge 的 feather。
+                fades_c = (t.get("fade_left", 0), t.get("fade_top", 0),
+                           t.get("fade_right", 0), t.get("fade_bottom", 0))
+                bands_m = [0.0] * 4
+                for ei, (b, fade) in enumerate(zip(bands_c, fades_c)):
+                    if b <= 0 or fade <= 0:
+                        continue
+                    half_fade = fade * 0.5
+                    want = b + mask_feather
+                    bands_m[ei] = min(want, max(0.0, half_fade - 1.0))
+                    if want > half_fade + 1e-6:
+                        mask_clamped = True
+                tile_edit_mask = _lock_band_mask(tw, th, tuple(bands_m), 0.0)
+            else:
+                tile_masks.append(torch.ones((1, 1, 1), dtype=torch.float32))
+
             # 【新增】生成当前分块（含重叠区）基于绝对画布坐标的 Mask
             tile_mask = None
             if t.get("kind") == "layer":
@@ -1028,12 +1098,18 @@ class ElementTileSplit:
                 "radius_br": t.get("radius_br", 0),
                 "layer_region": t.get("layer_region"),
                 "mask": tile_mask, # 将算好的像素级 mask 传入 grid
+                "edit_mask": tile_edit_mask,  # 锁边带 = 0，合并时剔除
                 "touch_left": tx == 0,
                 "touch_top": ty == 0,
                 "touch_right": tx + tw >= out_w,
                 "touch_bottom": ty + th >= out_h,
             })
             pbar.update_absolute(idx + 1, len(tiles))
+
+        if mask_clamped:
+            logging.warning("[TileSplit] lock band + feather exceeds half of the tile overlap; "
+                            "Merge exclusion was capped at overlap/2. Reduce edge_mask_pct/feather "
+                            "or increase overlap to keep the band fully excluded.")
 
         grid = {
             "tiles": grid_tiles,
@@ -1059,5 +1135,5 @@ class ElementTileSplit:
 
         logging.info("[TileSplit] mode=%s | %d tile(s) | canvas %dx%d (div=%d, unified=%.2fx)",
                      mode, len(tiles), out_w, out_h, div, u_up)
-        return {"ui": ui, "result": (tile_images, source, prompts, negatives, grid)}
+        return {"ui": ui, "result": (tile_images, source, prompts, negatives, grid, tile_masks)}
 

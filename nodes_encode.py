@@ -74,11 +74,13 @@ class ElementTileEncode:
                                          "tooltip": "Vision-slot size for the per-tile text encode. "
                                                     "Qwen Edit 2509/2511: area bucket, 0 or >=384 = official 384x384 resize. "
                                                     "Qwen Image 2.1: ignored. Krea 2: caps the vision input's longest side."}),
+                "tile_masks": ("MASK", {"tooltip": "Optional per-tile denoise mask from ElementTileSplit "
+                                                   "(tile_masks). White = repaint, black = keep as reference."}),
             },
         }
 
     def encode(self, model, vae, clip, tile_images, tile_prompts, tile_negatives,
-               reference_mode=False, grounding_px=768):
+               reference_mode=False, grounding_px=768, tile_masks=None):
         model = _unwrap(model)
         vae = _unwrap(vae)
         clip = _unwrap(clip)
@@ -99,6 +101,14 @@ class ElementTileEncode:
             raise ValueError(f"ElementTileEncode: {len(negatives)} negative(s) for {n} tile image(s).")
         if clip is None:
             raise ValueError("ElementTileEncode: 'clip' is not connected.")
+
+        masks = []
+        if tile_masks is not None:
+            masks = list(tile_masks) if isinstance(tile_masks, (list, tuple)) else [tile_masks]
+            if len(masks) != n:
+                logging.warning("[TileEncode] %d tile mask(s) for %d tile image(s); masks ignored.",
+                                len(masks), n)
+                masks = []
 
         alignment = _pixel_alignment(model)
 
@@ -158,7 +168,19 @@ class ElementTileEncode:
             latent = latent.to(device=comfy.model_management.intermediate_device(),
                                dtype=comfy.model_management.intermediate_dtype())
             latent = comfy.sample.fix_empty_latent_channels(model, latent)
-            tile_latents.append({"samples": latent})
+            latent_out = {"samples": latent}
+            if idx < len(masks) and masks[idx] is not None:
+                m = masks[idx]
+                if m.ndim == 4:
+                    m = m[:1, :1]
+                elif m.ndim == 3:
+                    m = m[:1].unsqueeze(1)
+                elif m.ndim == 2:
+                    m = m[None, None]
+                # 全白 = 整块都可重绘，无需 inpaint 路径
+                if float(m.min()) < 1.0:
+                    latent_out["noise_mask"] = m.to(device=latent.device, dtype=torch.float32)
+            tile_latents.append(latent_out)
 
             p, ng = prompts[idx], negatives[idx]
             if grounded:
