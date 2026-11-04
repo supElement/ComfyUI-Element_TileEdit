@@ -65,7 +65,7 @@ function defaultState() {
     version: 1, mode: "manual", div: 16,
     unified: { upscale: 2.0, columns: 2, rows: 2, tile_size: 1024 },
     overlap_mode: "px", overlap_px: 64, overlap_pct: 15,
-    enable_mask: false, edge_mask_pct: 90, edge_mask_feather: 24,
+    enable_mask: false, edge_mask_pct: 90, edge_mask_feather: 50,
     fill_gaps: true, gap_max_px: 1536,
     // global_prompt: "enhance quality preserving all the details", 
 	global_prompt: "Enhance image clarity and resolution. Sharpen fine details and textures across the entire image. Add natural micro-detail and micro-contrast. Make edges crisp but clean, surfaces and materials more defined, and reduce blur and noise. Natural colors, realistic light and shadow, professional finish.", 
@@ -542,7 +542,7 @@ function installStyles() {
 .ets-field input#ets-gmax, .ets-field input#ets-uup { width: 64px; }  /* U-upscale */
 .ets-field input#ets-ovpct { width: 42px; }  /* overlap % */
 .ets-field input#ets-emaskpct { width: 50px; }  /* edge mask lock % */
-.ets-field input#ets-emaskf { width: 46px; }  /* edge mask feather px */
+.ets-field input#ets-emaskf { width: 50px; }  /* edge mask feather % of lock band */
 .ets-field input.ovon{border-color:#43d9d1}
 
 .ets-ov-toggle {
@@ -639,6 +639,7 @@ class TileSplitUI {
     this.node = node; this.root = root; this.stateWidget = stateWidget;
     this.state = Object.assign(defaultState(), this.readState());
     this.state.unified = Object.assign(defaultState().unified, this.state.unified || {});
+    this.state.edge_mask_feather = clamp(Math.round(this.state.edge_mask_feather) || 0, 0, 100);
     if (!Array.isArray(this.state.layers)) this.state.layers = [];
     this.srcW = this.state.src_w || 0;
     this.srcH = this.state.src_h || 0;
@@ -713,6 +714,7 @@ class TileSplitUI {
     }
     this.state = Object.assign(defaultState(), st);
     this.state.unified = Object.assign(defaultState().unified, st.unified || {});
+    this.state.edge_mask_feather = clamp(Math.round(this.state.edge_mask_feather) || 0, 0, 100);
     this.state.layers = (st.layers || []).map((l, i) => Object.assign({
       id: i + 1, color: PALETTE[i % PALETTE.length], x: 0, y: 0, w: 0, h: 0,
       upscale: this.state.unified.upscale, cols: 1, rows: 1, prompt: "", negative: "",
@@ -772,8 +774,8 @@ class TileSplitUI {
   <label class="ets-field" id="ets-emaskpct-wrap" title="锁边带宽 = overlap/2 × 该比例（0–100%） | Locked band = overlap/2 × this percentage (0–100%)">
     lock <input type="number" id="ets-emaskpct" min="0" max="100" step="5">%
   </label>
-  <label class="ets-field" id="ets-emaskf-wrap" title="锁定带外沿的羽化宽度（画布像素，0 = 硬边）| Merge 端会额外剔除 锁定带+羽化 的区域，因为模型在硬边界附近仍会残留一小条未重绘内容 | 剔除宽度受 overlap 限制：需满足 锁定带+羽化 ≤ overlap/2（即 lock% ≤ 100 − 200×羽化/overlap），否则会限幅并告警 | Feather outside the locked band, in canvas pixels (0 = hard edge); Merge also drops locked band + feather, capped so band+feather ≤ overlap/2">
-    feather <input type="number" id="ets-emaskf" min="0" step="2">px
+  <label class="ets-field" id="ets-emaskf-wrap" title="锁定带内部的羽化比例（0–100%，相对该边锁定带宽度）| 羽化只向 mask=0 一侧腐蚀：外沿保持 0，越往块内越接近 1，到锁定带内沿正好到 1；不会侵占带外的可重绘区（0% = 硬边，100% = 整条锁定带都是渐变）| Feather inside the locked band as a percentage of its width (0–100%). The outer edge stays locked and the ramp ends at the band's inner edge, so the repaint area outside the band is never reduced (0% = hard edge, 100% = the whole band is a gradient)">
+    feather <input type="number" id="ets-emaskf" min="0" max="100" step="5">%
   </label>
   
   <span class="only-manual">
@@ -892,7 +894,7 @@ class TileSplitUI {
     onNum("ets-ovpx", v => { this.state.overlap_px = Math.max(0, Math.round(v)); });
     onNum("ets-ovpct", v => { this.state.overlap_pct = Math.max(0, v || 0); });
     onNum("ets-emaskpct", v => { this.state.edge_mask_pct = clamp(Math.round(v) || 0, 0, 100); });
-    onNum("ets-emaskf", v => { this.state.edge_mask_feather = Math.max(0, Math.round(v) || 0); });
+    onNum("ets-emaskf", v => { this.state.edge_mask_feather = clamp(Math.round(v) || 0, 0, 100); });
 
     const emask = this.root.querySelector("#ets-emask");
     emask.addEventListener("change", () => {
