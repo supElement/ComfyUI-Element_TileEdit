@@ -124,7 +124,7 @@
 
 ---
 
-下面图示以 Tile01 为例，Tile02 镜像  
+下面图示以 Tile01 为例，Tile02 镜像，feather 示意只适用于 split 节点，merge 节点的 feather 以中线向两侧取值。  
 
 <img width="2168" height="1133" alt="image" src="https://github.com/user-attachments/assets/3bf328fb-66ef-48bc-ac77-df8c6cdedacb" />
 
