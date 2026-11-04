@@ -84,7 +84,7 @@ Pure geometric splitting + image source intake, no model dependency. At executio
 | `prompt` | STRING list | Per-tile positive condition (after layer + global composition). |
 | `negative_prompt` | STRING list | Per-tile negative condition. |
 | `grid` | GRID | Structured JSON. Connect to Encode / Merge. |
-| `tile_masks` | MASK list | Per-tile sampling mask. Not all-white when `edge mask` is on; connect to Encode's `tile_masks` for the lock to take effect. |
+| `tile_masks` | MASK list | Per-tile sampling mask. Not all-white when `edge mask` is on; **must** be connected to Encode's `tile_masks` (Encode declares it as a required port). |
 
 ### Three Modes
 
@@ -106,7 +106,7 @@ Pure geometric splitting + image source intake, no model dependency. At executio
 | `Cols / Rows` | 2 / 2 | Count mode rows/columns. | Only active in count mode. |
 | `tile` | 1024 | Target size in size mode. | Only active in size mode. |
 | `overlap px / %` | 64px | Overlap. Click `px` / `%` buttons to switch units. | Both values are kept; only the currently active unit takes effect. **No upper cap** — whatever you enter is used. |
-| `edge mask` | off | Lock the outer overlap band with a mask: sampling never repaints it, it's reference only; Merge drops it automatically. | Requires wiring Split's `tile_masks` into Encode, otherwise it does nothing. See "Edge Mask" below. |
+| `edge mask` | off | Lock the outer overlap band with a mask: sampling never repaints it, it's reference only; Merge drops it automatically. | Split's `tile_masks` must be wired into Encode (that port is required, so a missing wire errors out immediately). See "Edge Mask" below. |
 | `lock` | 90% | Locked band width = `overlap/2 × lock%` (0–100%). | Default 90. At 100 the whole half-overlap is locked; Merge's exclusion saturates at `overlap/2`, leaving almost no repainted content in the overlap — generally not recommended as a default. |
 | `feather` | 24px | Feather on the **outer edge of the locked band** (canvas pixels). | Merge additionally drops `locked band + feather`; requires `band + feather ≤ overlap/2`, otherwise the exclusion is clamped and a warning is logged. |
 | `fill gaps` | on | Auto-fill uncovered areas outside boxes. | Only effective in manual mode. |
@@ -121,7 +121,7 @@ When enabled, only edges that **have a neighbor** get a locked band (canvas bord
 - The model still leaves a thin un-repainted strip just outside a hard mask edge, so **Merge drops the whole `locked band + feather` zone** (it is either un-repainted or only partially repainted). The exclusion is a hard cut; blending is handled by Merge's own `feather`.
 - The exclusion is limited by the overlap: each side can drop at most `overlap/2`, i.e. `band + feather ≤ overlap/2`, equivalent to `lock% ≤ 100 − 200×feather/overlap`. Exceeding it clamps the exclusion and logs a warning, so two sides never over-exclude into a black gap.
 - Examples: `overlap=96px, feather=24px` → `lock ≤ 50%`; `overlap=256px, feather=24px` → `lock ≤ 81%`; `overlap=512px, feather=24px` → 90% is fine.
-- Chain: Split's `tile_masks` → Encode's `tile_masks`. Without this link the sampler does not lock anything.
+- Chain: Split's `tile_masks` → Encode's `tile_masks`, **required**. Encode declares this port as required, so ComfyUI errors out at queue time instead of finishing a full sampling pass before you notice the lock was inactive.
 
 ### Model Compatibility
 
@@ -189,7 +189,7 @@ Edge masking is not tied to Qwen Image 2.1: **any model sampled through ComfyUI'
 
 ## ElementTileEncode (Split Version, Step 2)
 
-Encodes each tile's image / prompt into per-tile LATENT + CONDITIONING.
+Encodes each tile's image / prompt into per-tile LATENT + CONDITIONING, and also returns a MODEL ready for sampling (the Krea 2 in-context branch auto-applies the required patch).
 
 ### Input Ports
 
@@ -201,11 +201,13 @@ Encodes each tile's image / prompt into per-tile LATENT + CONDITIONING.
 | `tile_images` | IMAGE list | Yes | From Split's `split_images`. |
 | `tile_prompts` | STRING list | Yes | From Split's `prompt`. |
 | `tile_negatives` | STRING list | Yes | From Split's `negative_prompt`. |
+| `tile_masks` | MASK list | **Yes** | From Split's 6th output, `tile_masks`. White = repaint, black = keep as reference. When `edge mask` is off it is an all-white list, so wiring it is harmless; **without it ComfyUI refuses to run**, avoiding a full sampling pass with the lock silently inactive. |
 
 ### Output Ports
 
 | Port | Type | Description |
 |---|---|---|
+| `model` | MODEL | Sampling model; connect to KSampler's model. On the Krea 2 in-context branch, if the upstream model has no in-context patch yet, this node adds it automatically; otherwise returned unchanged. |
 | `tile_positives` | CONDITIONING list | One per tile. Connect to KSampler's positive. |
 | `tile_negatives` | CONDITIONING list | One per tile. Connect to KSampler's negative. |
 | `tile_latents` | LATENT list | One per tile. Connect to KSampler's latent_image. |
@@ -214,7 +216,7 @@ Encodes each tile's image / prompt into per-tile LATENT + CONDITIONING.
 
 | Parameter | Type | Default | Description | Notes |
 |---|---|---|---|---|
-| `reference_mode` | BOOLEAN | False | ON = Krea 2 identity-edit (in-context layout); OFF = conditioning (auto-grounded depending on tokenizer capability). | **Only works with Krea 2**. When ON, non-Krea 2 falls back to conditioning with a warning. When ON, you **must** connect `Krea2 In-Context Patch` before KSampler. |
+| `reference_mode` | BOOLEAN | False | ON = Krea 2 identity-edit (in-context layout); OFF = conditioning (auto-grounded depending on tokenizer capability). | **Only works with Krea 2**. When ON, non-Krea 2 falls back to conditioning with a warning. When ON, connect this node's `model` output straight to KSampler (the in-context patch is applied automatically); you only need to insert `Krea2 In-Context Patch` manually if you insist on using the original MODEL. |
 | `grounding_px` | INT 0–4096 (step 32) | 768 | Vision-slot size. | Same semantics as TiledUpscale. |
 
 ### Branch Behavior (automatic)
@@ -227,12 +229,12 @@ Encodes each tile's image / prompt into per-tile LATENT + CONDITIONING.
 
 ### Required Patches
 
-**This node does not output MODEL**. To make reference strength take effect step-by-step:
+**This node outputs `model`**. On the Krea 2 in-context branch, if the upstream model has no in-context patch yet, this node applies it automatically (equivalent to `ElementKrea2InContextPatch`); other branches return the model unchanged and never double-patch.
 
 | Which branch | Required patch |
 |---|---|
-| generic reference-latents | `ElementStrengthSchedule` (connect to KSampler's model) |
-| Krea 2 in-context | `ElementKrea2InContextPatch` (optionally stack `StrengthSchedule` on top) |
+| generic reference-latents / grounded | `ElementStrengthSchedule`: insert between this node's `model` output and KSampler to weaken references step by step |
+| Krea 2 in-context | the in-context patch is already applied by this node; optionally chain `ElementStrengthSchedule` after the `model` output for per-step reference strength |
 
 ---
 
@@ -278,7 +280,7 @@ Stitches each tile's generated result back onto the canvas using `grid`.
 - **Without `tile_sources`, `color_match_strength` is completely ineffective**.
 - **When Split is in manual mode and `fill gaps` is not active**, not connecting `original_image` causes uncovered missing areas to show black underlay.
 - `feather = 0` equals hard stitching.
-- You can use the [Smart merge images node](https://github.com/supElement/ComfyUI_Element_easy) from another extension as a replacement; it provides better results for color and distortion correction.
+- You can use the [Smart merge images node](https://github.com/supElement/ComfyUI_Element_easy) from another extension as a replacement; it provides better results for color and distortion correction. When connected to Split's `grid`, it also reads `mask` (rounded silhouette) and `edit_mask` (lock band), so the locked band is excluded there too.
 ---
 
 ## ElementKrea2InContextPatch (Model Patch)
@@ -302,7 +304,7 @@ Stitches each tile's generated result back onto the canvas using `grid`.
 | Scenario | Needed? |
 |---|---|
 | All-in-one + Krea 2 + `reference_mode = ON` | **Not needed** (handled internally) |
-| Split version + Krea 2 + Encode's `reference_mode = ON` | **Required** |
+| Split version + Krea 2 + Encode's `reference_mode = ON` | **Not needed** (use Encode's `model` output; the patch is applied automatically). Only required if you insist on feeding the original MODEL to KSampler |
 | Non-Krea 2 models | Harmless to connect (pass-through) |
 
 ---
@@ -342,7 +344,7 @@ Attaches a per-step `reference_strength` schedule to the model.
 
 ### Notes
 
-- **Must be connected to KSampler's model input**. Split doesn't output MODEL; connecting it after Split does nothing.
+- **Must be connected to KSampler's model input**. Split doesn't output MODEL; connecting it after Split does nothing. In the split version, insert it between Encode's `model` output and KSampler.
 - **Don't use it together with TiledUpscale**: the all-in-one already attaches the same-named patch internally; re-attaching gets stripped by `_strip_owned_patches` and re-added, which is redundant.
 - For decimal separators, **use the English period `0.8`**; Chinese periods will fail to parse.
 - Can accept the `strength_string` output from [Element_listGraph_Curve](https://github.com/supElement/ComfyUI_Element_easy).

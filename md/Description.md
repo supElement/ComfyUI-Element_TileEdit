@@ -83,7 +83,7 @@
 | `prompt` | STRING 列表 | 每块正条件（layer + global 合成后）。 |
 | `negative_prompt` | STRING 列表 | 每块负条件。 |
 | `grid` | GRID | 结构化 JSON。接 Encode / Merge。 |
-| `tile_masks` | MASK 列表 | 每块的采样 mask。开启 `edge mask` 时非全白；接 Encode 的 `tile_masks`，锁边才会生效。 |
+| `tile_masks` | MASK 列表 | 每块的采样 mask。开启 `edge mask` 时非全白；**必须**接到 Encode 的 `tile_masks`（Encode 已设为必填端口）。 |
 
 ### 三种模式
 
@@ -105,7 +105,7 @@
 | `Cols / Rows` | 2 / 2 | count 模式的行列。 | 只在 count 模式生效。 |
 | `tile` | 1024 | size 模式的目标尺寸。 | 只在 size 模式生效。 |
 | `overlap px / %` | 64px | 重叠。点 `px` / `%` 按钮切换单位。 | 两种都改，只有当前激活的生效。**不设上限**，填多少用多少。 |
-| `edge mask` | 关 | 把 overlap 外圈用 mask 锁住：采样时该带不重绘，只作参考；Merge 端自动剔除。 | 需要把 Split 的 `tile_masks` 接到 Encode，否则不生效。详见下方"锁边"。 |
+| `edge mask` | 关 | 把 overlap 外圈用 mask 锁住：采样时该带不重绘，只作参考；Merge 端自动剔除。 | 必须把 Split 的 `tile_masks` 接到 Encode（该端口已设为必填，未连会直接报错）。详见下方"锁边"。 |
 | `lock` | 90% | 锁边带宽 = `overlap/2 × lock%`（0–100%）。 | 默认 90。100 = 半边 overlap 全部锁住，Merge 剔除会饱和在 `overlap/2`，重叠区几乎没有参与合成的重绘内容，一般不建议常用。 |
 | `feather` | 24px | 锁定带**外沿**的羽化宽度（画布像素）。 | Merge 端会额外剔除 `锁定带 + feather`；要求 `锁定带 + feather ≤ overlap/2`，否则剔除被限幅并打 warning。 |
 | `fill gaps` | 开 | 自动补框外未覆盖区域。 | 只对 manual 模式有效。 |
@@ -120,7 +120,7 @@
 - 模型在硬 mask 边界附近仍会残留一小条没重绘的内容，所以 **Merge 会剔除 `锁定带 + feather` 整段**（这段要么没被重绘，要么只被部分重绘）。剔除直接硬切，过渡交给 Merge 自己的 `feather`。
 - 剔除宽度受重叠限制：每边最多剔到 `overlap/2`，即需满足 `锁定带 + feather ≤ overlap/2`，等价于 `lock% ≤ 100 − 200×feather/overlap`。超出会限幅并打 warning，避免两侧都剔太多形成黑缝。
 - 例：`overlap=96px, feather=24px` → `lock ≤ 50%`；`overlap=256px, feather=24px` → `lock ≤ 81%`；`overlap=512px, feather=24px` → 90% 没问题。
-- 链路：Split 的 `tile_masks` → Encode 的 `tile_masks`。不接这条线时采样不会锁边。
+- 链路：Split 的 `tile_masks` → Encode 的 `tile_masks`，**必接**。Encode 已把该端口设为必填，未连接时 ComfyUI 在排队阶段就会报错，不会跑完采样才发现锁边没生效。
 
 ### 锁边的模型适用性
 
@@ -189,7 +189,7 @@
 
 ## ElementTileEncode（拆分版第二步）
 
-把每块图像 / 提示词编码成 per-tile 的 LATENT + CONDITIONING。
+把每块图像 / 提示词编码成 per-tile 的 LATENT + CONDITIONING，并同时输出可直接采样的 MODEL（Krea 2 in-context 分支会自动补补丁）。
 
 ### 输入端口
 
@@ -201,12 +201,13 @@
 | `tile_images` | IMAGE 列表 | 是 | 来自 Split 的 `split_images`。 |
 | `tile_prompts` | STRING 列表 | 是 | 来自 Split 的 `prompt`。 |
 | `tile_negatives` | STRING 列表 | 是 | 来自 Split 的 `negative_prompt`。 |
-| `tile_masks` | MASK 列表 | 否 | 来自 Split 的 `tile_masks`。白色 = 重绘，黑色 = 保留作参考。接上后 Split 的 `edge mask` 锁边才会生效。 |
+| `tile_masks` | MASK 列表 | **是** | 来自 Split 的第 6 个输出 `tile_masks`。白色 = 重绘，黑色 = 保留作参考。未开 `edge mask` 时是整列全白，接了也无害；**不接则 ComfyUI 直接拒绝执行**，避免开了锁边却白跑采样。 |
 
 ### 输出端口
 
 | 端口 | 类型 | 说明 |
 |---|---|---|
+| `model` | MODEL | 采样模型，接 KSampler 的 model。走 Krea 2 in-context 且上游未挂 in-context 补丁时，本节点已自动补上；其余情况原样返回。 |
 | `tile_positives` | CONDITIONING 列表 | 与 tile 一一对应。接 KSampler 的 positive。 |
 | `tile_negatives` | CONDITIONING 列表 | 与 tile 一一对应。接 KSampler 的 negative。 |
 | `tile_latents` | LATENT 列表 | 与 tile 一一对应。接 KSampler 的 latent_image。 |
@@ -215,7 +216,7 @@
 
 | 参数 | 类型 | 默认 | 说明 | 注意事项 |
 |---|---|---|---|---|
-| `reference_mode` | BOOLEAN | False | ON = Krea 2 identity-edit（in-context 布局）；OFF = conditioning（视 tokenizer 能力自动 grounded）。 | **只对 Krea 2 有效**。ON 时非 Krea 2 会 fallback 到 conditioning 并打 warning。ON 时**必须**在 KSampler 前接 `Krea2 In-Context Patch`。 |
+| `reference_mode` | BOOLEAN | False | ON = Krea 2 identity-edit（in-context 布局）；OFF = conditioning（视 tokenizer 能力自动 grounded）。 | **只对 Krea 2 有效**。ON 时非 Krea 2 会 fallback 到 conditioning 并打 warning。ON 时直接把本节点的 `model` 输出接 KSampler 即可（in-context 补丁已自动补）；只有坚持用原始 MODEL 时，才需要在 KSampler 前手动接 `Krea2 In-Context Patch`。 |
 | `grounding_px` | INT 0–4096 (step 32) | 768 | 视觉槽尺寸。 | 语义同 TiledUpscale。 |
 
 ### 分支行为（自动）
@@ -228,12 +229,12 @@
 
 ### 配套补丁
 
-**本节点不输出 MODEL**。要让参考强度逐步生效：
+**本节点输出 `model`**。Krea 2 in-context 分支且上游还没挂 in-context 补丁时，本节点会自动补上（等同 `ElementKrea2InContextPatch`）；其它分支原样返回，不会重复打补丁。
 
 | 走哪条分支 | 需要哪个补丁 |
 |---|---|
-| 通用 reference-latents | `ElementStrengthSchedule`（接 KSampler 的 model） |
-| Krea 2 in-context | `ElementKrea2InContextPatch`（可选再叠 `StrengthSchedule`） |
+| 通用 reference-latents / grounded | `ElementStrengthSchedule`：接在本节点 `model` 输出与 KSampler 之间，逐 step 削弱参考 |
+| Krea 2 in-context | in-context 补丁已由本节点自动补；如需再控参考强度，在 `model` 输出后串 `ElementStrengthSchedule`（可选） |
 
 ---
 
@@ -282,7 +283,7 @@
 - `feather = 0` 等于在重叠中线硬切（不是贴分块边缘硬切）。
 - 开启 Split 的 `edge mask` 时，**merge feather 建议 < 0.5**：过渡带落在两侧都已完整重绘的中段；再大赛测会在锁定带外沿露出模型残留的未重绘细边（表现为一条锐利白线/原图线）。
 
-可以使用另一个扩展中的 [Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 替代，Smart merge images 对色彩和畸变校正的处理结果更好。
+可以使用另一个扩展中的 [Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 替代，Smart merge images 对色彩和畸变校正的处理结果更好。接 Split 的 `grid` 时它同样会读取 `mask`（圆角外形）和 `edit_mask`（锁边带），锁定带一样会被剔除。
 
 ---
 
@@ -307,7 +308,7 @@
 | 场景 | 是否需要 |
 |---|---|
 | 一体化 + Krea 2 + `reference_mode = ON` | **不需要**（内部已处理） |
-| 拆分版 + Krea 2 + Encode 的 `reference_mode = ON` | **必须** |
+| 拆分版 + Krea 2 + Encode 的 `reference_mode = ON` | **不需要**（用 Encode 的 `model` 输出，已自动补）；只有坚持用原始 MODEL 接 KSampler 时才手动接 |
 | 非 Krea 2 模型 | 接了也无害（pass-through） |
 
 ---
@@ -347,7 +348,7 @@
 
 ### 注意事项
 
-- **必须接在 KSampler 的 model 输入上**。Split 不输出 MODEL，接在 Split 后面完全无效。
+- **必须接在 KSampler 的 model 输入上**。Split 不输出 MODEL，接在 Split 后面完全无效；拆分版请接在 Encode 的 `model` 输出与 KSampler 之间。
 - **不要和 TiledUpscale 一起用**：一体化内部已挂同名 patch，重复接会被 `_strip_owned_patches` 摘掉再重挂，属于多余操作。
 - 分隔符里"小数请用英文句点 `0.8`"，用中文句点会解析失败。
 - 可接收 [Element_listGraph_Curve](https://github.com/supElement/ComfyUI_Element_easy) 的 strength_string 输出。
