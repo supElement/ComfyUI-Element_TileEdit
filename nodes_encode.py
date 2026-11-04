@@ -65,6 +65,10 @@ class ElementTileEncode:
                 "tile_images": ("IMAGE",),
                 "tile_prompts": ("STRING", {"forceInput": True}),
                 "tile_negatives": ("STRING", {"forceInput": True}),
+                "tile_masks": ("MASK", {"tooltip": "Required: ElementTileSplit's 6th output (tile_masks). "
+                                                   "White = repaint, black = keep as reference. "
+                                                   "When Split's edge mask is off this is an all-white list, so wiring it is always safe; "
+                                                   "leaving it unconnected while the edge mask is on silently disables the sampler lock."}),
             },
             "optional": {
                 "reference_mode": ("BOOLEAN", {"default": False,
@@ -74,8 +78,6 @@ class ElementTileEncode:
                                          "tooltip": "Vision-slot size for the per-tile text encode. "
                                                     "Qwen Edit 2509/2511: area bucket, 0 or >=384 = official 384x384 resize. "
                                                     "Qwen Image 2.1: ignored. Krea 2: caps the vision input's longest side."}),
-                "tile_masks": ("MASK", {"tooltip": "Optional per-tile denoise mask from ElementTileSplit "
-                                                   "(tile_masks). White = repaint, black = keep as reference."}),
             },
         }
 
@@ -109,6 +111,9 @@ class ElementTileEncode:
                 logging.warning("[TileEncode] %d tile mask(s) for %d tile image(s); masks ignored.",
                                 len(masks), n)
                 masks = []
+        else:
+            logging.warning("[TileEncode] tile_masks is not connected; sampler-side lock is disabled "
+                            "even if Split's edge mask is on.")
 
         alignment = _pixel_alignment(model)
 
