@@ -122,6 +122,13 @@
 - 例：`overlap=96px, feather=24px` → `lock ≤ 50%`；`overlap=256px, feather=24px` → `lock ≤ 81%`；`overlap=512px, feather=24px` → 90% 没问题。
 - 链路：Split 的 `tile_masks` → Encode 的 `tile_masks`，**必接**。Encode 已把该端口设为必填，未连接时 ComfyUI 在排队阶段就会报错，不会跑完采样才发现锁边没生效。
 
+---
+
+下面图示以 Tile01 为例，Tile02 镜像  
+
+<img width="2168" height="1133" alt="image" src="https://github.com/user-attachments/assets/3bf328fb-66ef-48bc-ac77-df8c6cdedacb" />
+
+---
 ### 锁边的模型适用性
 
 锁边不绑定 Qwen Image 2.1，**所有走 ComfyUI 标准采样器的模型都能用**（Qwen Image 2.1、Qwen Edit 2509/2511、Krea 2、FLUX.1、FLUX.2/klein、SD3.5、SDXL 等）：
