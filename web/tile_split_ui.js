@@ -65,6 +65,7 @@ function defaultState() {
     version: 1, mode: "manual", div: 16,
     unified: { upscale: 2.0, columns: 2, rows: 2, tile_size: 1024 },
     overlap_mode: "px", overlap_px: 64, overlap_pct: 15,
+    enable_mask: false, edge_mask_pct: 90, edge_mask_feather: 24,
     fill_gaps: true, gap_max_px: 1536,
     // global_prompt: "enhance quality preserving all the details", 
 	global_prompt: "Enhance image clarity and resolution. Sharpen fine details and textures across the entire image. Add natural micro-detail and micro-contrast. Make edges crisp but clean, surfaces and materials more defined, and reduce blur and noise. Natural colors, realistic light and shadow, professional finish.", 
@@ -78,14 +79,15 @@ function defaultState() {
 
 /* ---------- 与后端逐位一致的几何镜像 ---------- */
 function overlapPx(mode, pxVal, pctVal, edge) {
-  if (mode === "pct") return Math.round(clamp(Number(pctVal) || 0, 0, 45) / 100 * edge);
-  return clamp(Math.round(Number(pxVal) || 0), 0, Math.floor(edge / 2));
+  if (mode === "pct") return Math.round(Math.max(0, Number(pctVal) || 0) / 100 * edge);
+  return Math.max(0, Math.round(Number(pxVal) || 0));
 }
 function splitRegion(x, y, w, h, cols, rows, ov) {
   cols = Math.max(1, cols | 0); rows = Math.max(1, rows | 0); ov = Math.max(0, ov | 0);
   if (cols === 1 && rows === 1) return [{ x, y, w, h, col: 0, row: 0 }];
   const axis = (total, n, o) => {
     if (n === 1) return [[0, total]];
+    o = Math.min(o, total);  // 与后端一致：极端 overlap 下保持 step >= 0
     const cw = Math.max(1, Math.floor((total + o * (n - 1)) / n + 0.5));
     const step = (total - cw) / (n - 1);
     const out = [];
@@ -539,6 +541,8 @@ function installStyles() {
 .ets-field input#ets-ovpx, .ets-field input#ets-utile{width:56px} /* 扩宽特定输入框防止数字显示不全 */
 .ets-field input#ets-gmax, .ets-field input#ets-uup { width: 64px; }  /* U-upscale */
 .ets-field input#ets-ovpct { width: 42px; }  /* overlap % */
+.ets-field input#ets-emaskpct { width: 50px; }  /* edge mask lock % */
+.ets-field input#ets-emaskf { width: 46px; }  /* edge mask feather px */
 .ets-field input.ovon{border-color:#43d9d1}
 
 .ets-ov-toggle {
@@ -757,11 +761,20 @@ class TileSplitUI {
   </span>
   
   <span class="ets-field" title="相邻分块的重叠像素 | Overlap pixels between tiles">
-    overlap <span class="ets-ov-toggle" data-ov="px">px</span><input type="number" id="ets-ovpx" min="0" max="2048" step="8">
+    overlap <span class="ets-ov-toggle" data-ov="px">px</span><input type="number" id="ets-ovpx" min="0" step="8">
   </span>
   <span class="ets-field" title="相邻分块的重叠百分比 | Overlap percentage between tiles">
-    <span class="ets-ov-toggle" data-ov="pct">%</span><input type="number" id="ets-ovpct" min="0" max="45" step="1">
+    <span class="ets-ov-toggle" data-ov="pct">%</span><input type="number" id="ets-ovpct" min="0" step="1">
   </span>
+  <label class="ets-field" title="开启后 overlap 外圈用 mask 锁住：重采样时该带不参与重绘，只作为参考；Merge 端会自动剔除该带 | Lock the outer overlap band so sampling never repaints it (reference only); Merge drops it automatically">
+    edge mask <input type="checkbox" id="ets-emask">
+  </label>
+  <label class="ets-field" id="ets-emaskpct-wrap" title="锁边带宽 = overlap/2 × 该比例（0–100%） | Locked band = overlap/2 × this percentage (0–100%)">
+    lock <input type="number" id="ets-emaskpct" min="0" max="100" step="5">%
+  </label>
+  <label class="ets-field" id="ets-emaskf-wrap" title="锁定带外沿的羽化宽度（画布像素，0 = 硬边）| Merge 端会额外剔除 锁定带+羽化 的区域，因为模型在硬边界附近仍会残留一小条未重绘内容 | 剔除宽度受 overlap 限制：需满足 锁定带+羽化 ≤ overlap/2（即 lock% ≤ 100 − 200×羽化/overlap），否则会限幅并告警 | Feather outside the locked band, in canvas pixels (0 = hard edge); Merge also drops locked band + feather, capped so band+feather ≤ overlap/2">
+    feather <input type="number" id="ets-emaskf" min="0" step="2">px
+  </label>
   
   <span class="only-manual">
     <label class="ets-field" title="自动拆分未被手绘框覆盖的区域 | Smart-split uncovered area">
@@ -877,7 +890,16 @@ class TileSplitUI {
     onNum("ets-utile", v => { this.state.unified.tile_size = clamp(roundDiv(v || 1024, this.state.div), this.state.div, 8192); });
     onNum("ets-gmax", v => { this.state.gap_max_px = clamp(roundDiv(v || 1536, this.state.div), this.state.div, 8192); });
     onNum("ets-ovpx", v => { this.state.overlap_px = Math.max(0, Math.round(v)); });
-    onNum("ets-ovpct", v => { this.state.overlap_pct = clamp(v || 0, 0, 45); });
+    onNum("ets-ovpct", v => { this.state.overlap_pct = Math.max(0, v || 0); });
+    onNum("ets-emaskpct", v => { this.state.edge_mask_pct = clamp(Math.round(v) || 0, 0, 100); });
+    onNum("ets-emaskf", v => { this.state.edge_mask_feather = Math.max(0, Math.round(v) || 0); });
+
+    const emask = this.root.querySelector("#ets-emask");
+    emask.addEventListener("change", () => {
+      this.state.enable_mask = emask.checked;
+      this.saveState();
+      this.render();
+    });
 	
     this.root.querySelectorAll('.ets-ov-toggle').forEach(btn => {
       btn.onclick = () => {
@@ -1780,7 +1802,16 @@ Ctrl + drag on canvas to draw a layer box</div>`;
     set("ets-ucols", s.unified.columns); set("ets-urows", s.unified.rows);
     set("ets-utile", s.unified.tile_size);
     set("ets-ovpx", s.overlap_px); set("ets-ovpct", s.overlap_pct);
+    set("ets-emaskpct", s.edge_mask_pct);
+    set("ets-emaskf", s.edge_mask_feather);
     set("ets-gmax", s.gap_max_px);
+
+    const emask = this.root.querySelector("#ets-emask");
+    if (document.activeElement !== emask) emask.checked = !!s.enable_mask;
+    for (const id of ["#ets-emaskpct-wrap", "#ets-emaskf-wrap"]) {
+      const wrap = this.root.querySelector(id);
+      if (wrap) wrap.style.display = s.enable_mask ? "" : "none";
+    }
 	
     const fg = this.root.querySelector("#ets-fg");
     if (document.activeElement !== fg) fg.checked = !!s.fill_gaps;
