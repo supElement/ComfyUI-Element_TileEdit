@@ -34,7 +34,7 @@
 | `rows` | INT 1–16 | 2 | 纵向行数。 | 只在 `tile_mode = ON` 时生效。 |
 | `tile_size` | INT 0–4096 (step 16) | 0 | 每块的生成分辨率。 | 只在 `tile_mode = OFF` 时生效。`0` = 自动（长边约 4 块，落在 1024–1536）。**identity-edit LoRA 建议每块 ≤ 2MP**。 |
 | `overlap` | INT 0–2048 (step 16) | 0 | 相邻块重叠像素。 | `0` = 自动（15% tile 尺寸，上限 256px）。**非 0 值原样使用，不设上限**。接缝明显就加大。 |
-| `feather` | FLOAT 0–1 | 1.0 | 合并时的羽化强度。 | 越小接缝越硬。用 smoothstep 曲线过渡，不是线性。 |
+| `feather` | FLOAT 0–1 | 1.0 | 合并时的羽化强度。 | 越小接缝越硬。用 smoothstep 曲线过渡，不是线性。**一体化按分块边缘起算过渡带**，与拆分版 Merge 的"重叠中线"语义不同。 |
 | `seed` | INT | 0 | 采样种子。 | 每块的种子会基于此做确定性偏移，改它会影响所有块。 |
 | `steps` | INT 1–10000 | 8 | 每块采样步数。 | `reference_strength` 列表与它**严格一一对应**。 |
 | `cfg` | FLOAT | 1.0 | CFG。 | **> 1 才会在 in-context / grounded 分支额外编码负条件**。用 Krea 2 in-context 时通常保持 1.0。 |
@@ -83,6 +83,7 @@
 | `prompt` | STRING 列表 | 每块正条件（layer + global 合成后）。 |
 | `negative_prompt` | STRING 列表 | 每块负条件。 |
 | `grid` | GRID | 结构化 JSON。接 Encode / Merge。 |
+| `tile_masks` | MASK 列表 | 每块的采样 mask。开启 `edge mask` 时非全白；接 Encode 的 `tile_masks`，锁边才会生效。 |
 
 ### 三种模式
 
@@ -103,9 +104,33 @@
 | `U-upscale` | 2.0 | 统一放大倍数（0.1–16）。 | 输出画布 = 源 × 它，ceil 对齐 `div`。 |
 | `Cols / Rows` | 2 / 2 | count 模式的行列。 | 只在 count 模式生效。 |
 | `tile` | 1024 | size 模式的目标尺寸。 | 只在 size 模式生效。 |
-| `overlap px / %` | 64px | 重叠。点 `px` / `%` 按钮切换单位。 | 两种都改，只有当前激活的生效。 |
+| `overlap px / %` | 64px | 重叠。点 `px` / `%` 按钮切换单位。 | 两种都改，只有当前激活的生效。**不设上限**，填多少用多少。 |
+| `edge mask` | 关 | 把 overlap 外圈用 mask 锁住：采样时该带不重绘，只作参考；Merge 端自动剔除。 | 需要把 Split 的 `tile_masks` 接到 Encode，否则不生效。详见下方"锁边"。 |
+| `lock` | 90% | 锁边带宽 = `overlap/2 × lock%`（0–100%）。 | 默认 90。100 = 半边 overlap 全部锁住，Merge 剔除会饱和在 `overlap/2`，重叠区几乎没有参与合成的重绘内容，一般不建议常用。 |
+| `feather` | 24px | 锁定带**外沿**的羽化宽度（画布像素）。 | Merge 端会额外剔除 `锁定带 + feather`；要求 `锁定带 + feather ≤ overlap/2`，否则剔除被限幅并打 warning。 |
 | `fill gaps` | 开 | 自动补框外未覆盖区域。 | 只对 manual 模式有效。 |
 | `max side` | 1536 | 补块的最大边长。 | 只对 fill gaps 补块有效。 |
+
+### 锁边（edge mask）
+
+开启后，只对**有邻居的边**锁住外圈一段（画布外沿不锁）：
+
+- **锁定带** = `overlap/2 × lock%`，比例折算到生成分辨率后写入采样 `noise_mask`：这一段不重绘，只作为参考。大幅改风格时能防止内容漂移。
+- **`feather`** 是锁定带外沿的羽化（画布像素，`0` = 硬边），让重绘区平滑接上锁定带。
+- 模型在硬 mask 边界附近仍会残留一小条没重绘的内容，所以 **Merge 会剔除 `锁定带 + feather` 整段**（这段要么没被重绘，要么只被部分重绘）。剔除直接硬切，过渡交给 Merge 自己的 `feather`。
+- 剔除宽度受重叠限制：每边最多剔到 `overlap/2`，即需满足 `锁定带 + feather ≤ overlap/2`，等价于 `lock% ≤ 100 − 200×feather/overlap`。超出会限幅并打 warning，避免两侧都剔太多形成黑缝。
+- 例：`overlap=96px, feather=24px` → `lock ≤ 50%`；`overlap=256px, feather=24px` → `lock ≤ 81%`；`overlap=512px, feather=24px` → 90% 没问题。
+- 链路：Split 的 `tile_masks` → Encode 的 `tile_masks`。不接这条线时采样不会锁边。
+
+### 锁边的模型适用性
+
+锁边不绑定 Qwen Image 2.1，**所有走 ComfyUI 标准采样器的模型都能用**（Qwen Image 2.1、Qwen Edit 2509/2511、Krea 2、FLUX.1、FLUX.2/klein、SD3.5、SDXL 等）：
+
+- 采样端：Split/Encode 只是把锁定带写进 latent 的 `noise_mask`，ComfyUI 会让每个采样步在该带内保留输入 latent，因此与模型结构无关。只有绕过 `noise_mask` 的第三方自定义采样器不生效。
+- Merge 端：剔除锁定带、中线羽化都是纯几何运算，与模型无关。
+- **分辨率差异**：锁定带的量化精度 = 模型 latent 的降采样倍数。8× 模型（Qwen Edit 2509/2511、Krea 2、FLUX.1、SD3/SDXL）约 8px 一格，16× 模型（Qwen Image 2.1、FLUX.2/klein）约 16px 一格。同样的 `lock`，16× 模型上锁定带更"软"，建议锁定带至少覆盖 2 个 latent 格（8× 模型 ≥16px，16× 模型 ≥32px）。
+- **边界残留宽度因模型而异**：mask 硬边界外，模型仍会留下一小条没完全重绘的区域。identity-edit / in-context 类（Krea 2）和大 denoise 配置残留更宽，inpaint 训练过的模型更服帖。所以 Split 的 `feather` 和 Merge 的 `feather` 都做成了可调项。
+- 没做过 inpaint/mask 训练的模型（FLUX.1 dev、SD3.5、SDXL base 等）也能工作，只是边界风格过渡可能更生硬，建议加大 `overlap` 和 Split 的 `feather`。
 
 ### UI 右侧 Layers 面板
 
@@ -156,6 +181,7 @@
 ### 输出注意事项
 
 - `split_images` 已经按 `gen_w × gen_h` 扩展了边缘。
+- `tile_masks` 与分块一一对应；未开启 `edge mask` 时全是全白 mask。
 - 分块总数上限 `MAX_TILES = 256`，超过直接抛错。
 - 后端发现 tiles 为空时会退化为"整幅单块"，并打 warning。
 
@@ -175,6 +201,7 @@
 | `tile_images` | IMAGE 列表 | 是 | 来自 Split 的 `split_images`。 |
 | `tile_prompts` | STRING 列表 | 是 | 来自 Split 的 `prompt`。 |
 | `tile_negatives` | STRING 列表 | 是 | 来自 Split 的 `negative_prompt`。 |
+| `tile_masks` | MASK 列表 | 否 | 来自 Split 的 `tile_masks`。白色 = 重绘，黑色 = 保留作参考。接上后 Split 的 `edge mask` 锁边才会生效。 |
 
 ### 输出端口
 
@@ -220,7 +247,7 @@
 |---|---|---|---|
 | `tile_images` | IMAGE 列表 | 是 | 每块生成结果（KSampler → VAE Decode 后的）。 |
 | `grid` | GRID | 是 | 来自 Split。 |
-| `feather` | FLOAT 0–1 | 是 | 羽化强度。默认 1.0。 |
+| `feather` | FLOAT 0–1 | 是 | 羽化强度（以重叠区中线为中心）。默认 1.0。 |
 | `tile_sources` | IMAGE 列表 | 否 | 每块原图。颜色匹配的参考。 |
 | `original_image` | IMAGE | 否（**建议接**） | 底图。不接时边缘 alpha < 1 可能发黑。 |
 | `color_match_strength` | FLOAT 0–1 | 否 | 颜色匹配强度。`0` = 关。 |
@@ -235,7 +262,7 @@
 
 | 参数 | 类型 | 默认 | 说明 | 注意事项 |
 |---|---|---|---|---|
-| `feather` | FLOAT 0–1 | 1.0 | 羽化强度。 | 用 smoothstep 曲线，不是线性。`0` 基本无羽化，接缝会硬。 |
+| `feather` | FLOAT 0–1 | 1.0 | 羽化强度。 | 过渡带**以重叠区中线为中心**，宽度 = 重叠 × feather：`0` = 正好在中线硬切，`0.5` = 只混合重叠区中间一半，`1` = 整个重叠区参与混合。用 smoothstep 曲线，不是线性。**开启 Split 锁边时建议 < 0.5**（见注意事项）。 |
 | `color_match_strength` | FLOAT 0–1 | 0.0 | 颜色匹配强度。 | **只在 > 0 时**触发，且**必须同时接 `tile_sources`** 才真正生效。统计用**边缘低权重像素**（< 0.8），避免中心内容被洗色。 |
 | `color_protection` | BOOLEAN | False | 色相保护 | 开启：将每个图块与其源内容进行比对，仅在像素被刻意重新着色的区域进行色彩匹配调整；这样既保留了人工绘制的色调/色彩修改，又能确保曝光修正依然生效。关闭：照常对每个图块进行色彩匹配。 |
 | `high_low_freq` | BOOLEAN | False | 高低频融合（只作用于羽化区） | 在低频部分采用“羽化”权重以平滑过渡，在高频部分则采用“竞争性”权重以保留细节——从而避免重叠区域内的细节因平均化处理而被抹平。 |
@@ -243,15 +270,17 @@
 ### 合并算法
 
 1. 底图：`original_image` 缩放到 `work_w × work_h`。
-2. 前景层（`kind = layer`）累加到 fg 画布；背景层（`gap / fallback / unified`）累加到 bg 画布。
-3. 归一化后合成：`base = bg * bg_alpha + original * (1 - bg_alpha)` → `merged = fg * fg_alpha + base * (1 - fg_alpha)`。
-4. 裁到 `img_h × img_w`（超采样区域裁掉）。
+2. 每块按 `grid` 里的 `edit_mask` 剔除 Split 锁定的区域（`锁定带 + split feather`），每边最多剔到重叠的一半。
+3. 前景层（`kind = layer`）累加到 fg 画布；背景层（`gap / fallback / unified`）累加到 bg 画布。
+4. 归一化后合成：`base = bg * bg_alpha + original * (1 - bg_alpha)` → `merged = fg * fg_alpha + base * (1 - fg_alpha)`。
+5. 裁到 `img_h × img_w`（超采样区域裁掉）。
 
 ### 注意事项
 
 - **`tile_sources` 不接时 `color_match_strength` 完全无效**。
 - **`original_image` 当split节点选择了手动分割模式，fill gaps 未激活时，不接这个端口，缺失分块的未覆盖区会透出黑底。
-- `feather = 0` 等于硬拼。  
+- `feather = 0` 等于在重叠中线硬切（不是贴分块边缘硬切）。
+- 开启 Split 的 `edge mask` 时，**merge feather 建议 < 0.5**：过渡带落在两侧都已完整重绘的中段；再大赛测会在锁定带外沿露出模型残留的未重绘细边（表现为一条锐利白线/原图线）。
 
 可以使用另一个扩展中的 [Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 替代，Smart merge images 对色彩和畸变校正的处理结果更好。
 

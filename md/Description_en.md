@@ -34,7 +34,7 @@ Does everything in one pass: upscale → split into tiles → re-render each til
 | `rows` | INT 1–16 | 2 | Row count. | Only effective when `tile_mode = ON`. |
 | `tile_size` | INT 0–4096 (step 16) | 0 | Per-tile generation resolution. | Only effective when `tile_mode = OFF`. `0` = auto (about 4 tiles along the long edge, falling between 1024–1536). **For identity-edit LoRAs, keep each tile ≤ 2MP**. |
 | `overlap` | INT 0–2048 (step 16) | 0 | Overlap pixels between adjacent tiles. | `0` = auto (15% of tile size, capped at 256px). **Non-zero values are used as-is, no cap**. Increase if seams are obvious. |
-| `feather` | FLOAT 0–1 | 1.0 | Merge feathering strength. | Lower values → harder seams. Uses smoothstep curve, not linear. |
+| `feather` | FLOAT 0–1 | 1.0 | Merge feathering strength. | Lower values → harder seams. Uses smoothstep curve, not linear. **The all-in-one ramps from the tile edge**, unlike the split version's Merge, whose transition is centered on the overlap midline. |
 | `seed` | INT | 0 | Sampling seed. | Per-tile seeds derive deterministically from this; changing it affects all tiles. |
 | `steps` | INT 1–10000 | 8 | Per-tile sampling steps. | The `reference_strength` list **corresponds strictly one-to-one** with this. |
 | `cfg` | FLOAT | 1.0 | CFG. | **Negative conditioning is only encoded in in-context / grounded branches when > 1**. With Krea 2 in-context, usually keep at 1.0. |
@@ -84,6 +84,7 @@ Pure geometric splitting + image source intake, no model dependency. At executio
 | `prompt` | STRING list | Per-tile positive condition (after layer + global composition). |
 | `negative_prompt` | STRING list | Per-tile negative condition. |
 | `grid` | GRID | Structured JSON. Connect to Encode / Merge. |
+| `tile_masks` | MASK list | Per-tile sampling mask. Not all-white when `edge mask` is on; connect to Encode's `tile_masks` for the lock to take effect. |
 
 ### Three Modes
 
@@ -104,9 +105,33 @@ Pure geometric splitting + image source intake, no model dependency. At executio
 | `U-upscale` | 2.0 | Unified upscale factor (0.1–16). | Output canvas = source × this, ceil-aligned to `div`. |
 | `Cols / Rows` | 2 / 2 | Count mode rows/columns. | Only active in count mode. |
 | `tile` | 1024 | Target size in size mode. | Only active in size mode. |
-| `overlap px / %` | 64px | Overlap. Click `px` / `%` buttons to switch units. | Both values are kept; only the currently active unit takes effect. |
+| `overlap px / %` | 64px | Overlap. Click `px` / `%` buttons to switch units. | Both values are kept; only the currently active unit takes effect. **No upper cap** — whatever you enter is used. |
+| `edge mask` | off | Lock the outer overlap band with a mask: sampling never repaints it, it's reference only; Merge drops it automatically. | Requires wiring Split's `tile_masks` into Encode, otherwise it does nothing. See "Edge Mask" below. |
+| `lock` | 90% | Locked band width = `overlap/2 × lock%` (0–100%). | Default 90. At 100 the whole half-overlap is locked; Merge's exclusion saturates at `overlap/2`, leaving almost no repainted content in the overlap — generally not recommended as a default. |
+| `feather` | 24px | Feather on the **outer edge of the locked band** (canvas pixels). | Merge additionally drops `locked band + feather`; requires `band + feather ≤ overlap/2`, otherwise the exclusion is clamped and a warning is logged. |
 | `fill gaps` | on | Auto-fill uncovered areas outside boxes. | Only effective in manual mode. |
 | `max side` | 1536 | Max side length for gap-fill tiles. | Only affects fill-gap tiles. |
+
+### Edge Mask
+
+When enabled, only edges that **have a neighbor** get a locked band (canvas borders are not locked):
+
+- **Locked band** = `overlap/2 × lock%`, converted to generation resolution and written into the sampling `noise_mask`: that strip is not repainted, only used as reference. It prevents content drift under heavy restyling.
+- **`feather`** is the feather on the outer edge of the locked band (canvas pixels, `0` = hard edge), so the repainted area joins the band smoothly.
+- The model still leaves a thin un-repainted strip just outside a hard mask edge, so **Merge drops the whole `locked band + feather` zone** (it is either un-repainted or only partially repainted). The exclusion is a hard cut; blending is handled by Merge's own `feather`.
+- The exclusion is limited by the overlap: each side can drop at most `overlap/2`, i.e. `band + feather ≤ overlap/2`, equivalent to `lock% ≤ 100 − 200×feather/overlap`. Exceeding it clamps the exclusion and logs a warning, so two sides never over-exclude into a black gap.
+- Examples: `overlap=96px, feather=24px` → `lock ≤ 50%`; `overlap=256px, feather=24px` → `lock ≤ 81%`; `overlap=512px, feather=24px` → 90% is fine.
+- Chain: Split's `tile_masks` → Encode's `tile_masks`. Without this link the sampler does not lock anything.
+
+### Model Compatibility
+
+Edge masking is not tied to Qwen Image 2.1: **any model sampled through ComfyUI's standard sampler works** (Qwen Image 2.1, Qwen Edit 2509/2511, Krea 2, FLUX.1, FLUX.2/klein, SD3.5, SDXL, …):
+
+- Sampler side: Split/Encode only write the locked band into the latent's `noise_mask`; ComfyUI keeps the input latent inside that band at every step, independent of model architecture. Only third-party custom samplers that bypass `noise_mask` are unaffected.
+- Merge side: dropping the locked band and the midline feather are pure geometry, fully model-agnostic.
+- **Resolution difference**: the quantization of the band equals the model's latent downscale factor. 8× models (Qwen Edit 2509/2511, Krea 2, FLUX.1, SD3/SDXL) give roughly 8px per cell; 16× models (Qwen Image 2.1, FLUX.2/klein) give roughly 16px per cell. At the same `lock`, the band is softer on 16× models — keep the band at least 2 latent cells wide (≥16px for 8× models, ≥32px for 16× models).
+- **Boundary residual width is model-dependent**: outside a hard mask edge the model still leaves a thin strip that is not fully repainted. Identity-edit / in-context models (Krea 2) and high-denoise settings leave a wider strip; inpaint-trained models follow the mask more tightly. That is why Split's `feather` and Merge's `feather` are both exposed.
+- Models without inpaint/mask training (FLUX.1 dev, SD3.5, SDXL base, …) still work, but the style transition at the boundary may be harsher — increase `overlap` and Split's `feather`.
 
 ### UI Right Layers Panel
 
