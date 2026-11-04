@@ -34,7 +34,7 @@ Does everything in one pass: upscale → split into tiles → re-render each til
 | `rows` | INT 1–16 | 2 | Row count. | Only effective when `tile_mode = ON`. |
 | `tile_size` | INT 0–4096 (step 16) | 0 | Per-tile generation resolution. | Only effective when `tile_mode = OFF`. `0` = auto (about 4 tiles along the long edge, falling between 1024–1536). **For identity-edit LoRAs, keep each tile ≤ 2MP**. |
 | `overlap` | INT 0–2048 (step 16) | 0 | Overlap pixels between adjacent tiles. | `0` = auto (15% of tile size, capped at 256px). **Non-zero values are used as-is, no cap**. Increase if seams are obvious. |
-| `feather` | FLOAT 0–1 | 1.0 | Merge feathering strength. | Lower values → harder seams. Uses smoothstep curve, not linear. **The all-in-one ramps from the tile edge**, unlike the split version's Merge, whose transition is centered on the overlap midline. |
+| `feather` | FLOAT 0–1 | 1.0 | Merge feathering strength. | Lower values → harder seams. Uses smoothstep curve, not linear. **The all-in-one ramps from the tile edge**, unlike the split version's Merge, whose transition lives between the two tiles' locked bands. |
 | `seed` | INT | 0 | Sampling seed. | Per-tile seeds derive deterministically from this; changing it affects all tiles. |
 | `steps` | INT 1–10000 | 8 | Per-tile sampling steps. | The `reference_strength` list **corresponds strictly one-to-one** with this. |
 | `cfg` | FLOAT | 1.0 | CFG. | **Negative conditioning is only encoded in in-context / grounded branches when > 1**. With Krea 2 in-context, usually keep at 1.0. |
@@ -108,7 +108,7 @@ Pure geometric splitting + image source intake, no model dependency. At executio
 | `overlap px / %` | 64px | Overlap. Click `px` / `%` buttons to switch units. | Both values are kept; only the currently active unit takes effect. **No upper cap** — whatever you enter is used. |
 | `edge mask` | off | Lock the outer overlap band with a mask: sampling never repaints it, it's reference only; Merge drops it automatically. | Split's `tile_masks` must be wired into Encode (that port is required, so a missing wire errors out immediately). See "Edge Mask" below. |
 | `lock` | 90% | Locked band width = `overlap/2 × lock%` (0–100%). | Default 90. At 100 the whole half-overlap is locked; Merge's exclusion saturates at `overlap/2`, leaving almost no repainted content in the overlap — generally not recommended as a default. |
-| `feather` | 24px | Feather on the **outer edge of the locked band** (canvas pixels). | Merge additionally drops `locked band + feather`; requires `band + feather ≤ overlap/2`, otherwise the exclusion is clamped and a warning is logged. |
+| `feather` | 50% | Feather **inside** the locked band, as a percentage of its width (0–100%). | The outer edge stays at mask=0 and the ramp reaches 1 at the band's inner edge, so it never takes repaintable area outside the band. 100% = the ramp covers the whole band. Merge drops only the locked band itself. |
 | `fill gaps` | on | Auto-fill uncovered areas outside boxes. | Only effective in manual mode. |
 | `max side` | 1536 | Max side length for gap-fill tiles. | Only affects fill-gap tiles. |
 
@@ -117,15 +117,16 @@ Pure geometric splitting + image source intake, no model dependency. At executio
 When enabled, only edges that **have a neighbor** get a locked band (canvas borders are not locked):
 
 - **Locked band** = `overlap/2 × lock%`, converted to generation resolution and written into the sampling `noise_mask`: that strip is not repainted, only used as reference. It prevents content drift under heavy restyling.
-- **`feather`** is the feather on the outer edge of the locked band (canvas pixels, `0` = hard edge), so the repainted area joins the band smoothly.
-- The model still leaves a thin un-repainted strip just outside a hard mask edge, so **Merge drops the whole `locked band + feather` zone** (it is either un-repainted or only partially repainted). The exclusion is a hard cut; blending is handled by Merge's own `feather`.
-- The exclusion is limited by the overlap: each side can drop at most `overlap/2`, i.e. `band + feather ≤ overlap/2`, equivalent to `lock% ≤ 100 − 200×feather/overlap`. Exceeding it clamps the exclusion and logs a warning, so two sides never over-exclude into a black gap.
-- Examples: `overlap=96px, feather=24px` → `lock ≤ 50%`; `overlap=256px, feather=24px` → `lock ≤ 81%`; `overlap=512px, feather=24px` → 90% is fine.
+- **`feather`** is a percentage **inside** the locked band (0–100% of that edge's band width). It erodes toward mask=0: the outer edge always stays 0, the mask rises toward the tile interior and reaches 1 exactly at the band's inner edge, so **it never takes repaintable area outside the band**. `0%` = hard edge; `50%` = outer half solidly locked, inner half a gradient; `100%` = the whole band is a gradient.
+- **Merge drops the locked band itself** (`≤ overlap/2`) and no longer adds `feather`, since the feathering now lives entirely inside the band. The exclusion is a hard cut; blending is handled by Merge's own `feather`.
+- Each side drops at most `overlap/2 − 1px`. At `lock=100%` the band reaches the midline, is clamped, and logs a warning; almost no middle remains for Merge's feather, so it is generally not recommended.
+- **Rounded hand-drawn tiles lock their corners too**: the lock band wraps around the rounded corner. The sampling silhouette is the expanded outline shrunk inward by the lock band (a **concentric** inset: same center, radius reduced from `r + overlap/2` to `r + overlap/2 − band`), so `mask=0` at the corner is a band as wide as the straight edges instead of the whole corner being cut into a large black wedge. Boxes with no rounding (radius 0) keep the original four-edge band logic. Same as the straight bands: inside the silhouette the mask stays 1 (repaintable) and the feather falls on the **outside** of the silhouette, ramping from the arc outward to 0 over the same `feather` width (no hard cut). A corner joins two edges; it is inset by the larger of their bands, and an edge with no neighbour (canvas border) contributes a zero-width band.
+- Examples: `overlap=100px, lock=50%` → band 25px; `feather=100%` → those 25px are a full gradient (0 at the outer edge → 1 at the inner edge); `feather=50%` → outer 12.5px solid, inner 12.5px gradient.
 - Chain: Split's `tile_masks` → Encode's `tile_masks`, **required**. Encode declares this port as required, so ComfyUI errors out at queue time instead of finishing a full sampling pass before you notice the lock was inactive.
 
 ---
 
-The illustration below uses Tile01 as an example, with Tile02 being a mirrored version. The "feather" indication applies only to the Split node; for a Merge node, the feathering is calculated by extending values ​​from the center line toward both sides.
+The illustration below uses Tile01 as an example, with Tile02 being a mirrored version. The "feather" indication applies only to the Split node; for a Merge node, feathering uses the repaintable middle between the locked bands of two hand-drawn tiles of the same layer, keeps the 50% point on the hand-drawn box edge while stopping at this tile's exclusion boundary on a side facing the background, and transitions across a rounded corner as a radial ramp centred on the drawn arc.
 
 <img width="2168" height="1133" alt="image" src="https://github.com/user-attachments/assets/3bf328fb-66ef-48bc-ac77-df8c6cdedacb" />
 
@@ -136,10 +137,10 @@ The illustration below uses Tile01 as an example, with Tile02 being a mirrored v
 Edge masking is not tied to Qwen Image 2.1: **any model sampled through ComfyUI's standard sampler works** (Qwen Image 2.1, Qwen Edit 2509/2511, Krea 2, FLUX.1, FLUX.2/klein, SD3.5, SDXL, …):
 
 - Sampler side: Split/Encode only write the locked band into the latent's `noise_mask`; ComfyUI keeps the input latent inside that band at every step, independent of model architecture. Only third-party custom samplers that bypass `noise_mask` are unaffected.
-- Merge side: dropping the locked band and the midline feather are pure geometry, fully model-agnostic.
+- Merge side: dropping the locked band and the transition between the two bands are pure geometry, fully model-agnostic.
 - **Resolution difference**: the quantization of the band equals the model's latent downscale factor. 8× models (Qwen Edit 2509/2511, Krea 2, FLUX.1, SD3/SDXL) give roughly 8px per cell; 16× models (Qwen Image 2.1, FLUX.2/klein) give roughly 16px per cell. At the same `lock`, the band is softer on 16× models — keep the band at least 2 latent cells wide (≥16px for 8× models, ≥32px for 16× models).
-- **Boundary residual width is model-dependent**: outside a hard mask edge the model still leaves a thin strip that is not fully repainted. Identity-edit / in-context models (Krea 2) and high-denoise settings leave a wider strip; inpaint-trained models follow the mask more tightly. That is why Split's `feather` and Merge's `feather` are both exposed.
-- Models without inpaint/mask training (FLUX.1 dev, SD3.5, SDXL base, …) still work, but the style transition at the boundary may be harsher — increase `overlap` and Split's `feather`.
+- **Boundary residual width is model-dependent**: even with feathering, a thin strip near the mask boundary may remain not fully repainted. Identity-edit / in-context models (Krea 2) and high-denoise settings leave a wider strip; inpaint-trained models follow the mask more tightly. That is why Split's `feather` and Merge's `feather` are both exposed.
+- Models without inpaint/mask training (FLUX.1 dev, SD3.5, SDXL base, …) still work, but the style transition at the boundary may be harsher — increase `overlap` (and lower `lock` a little to leave a middle section for Merge's feather).
 
 ### UI Right Layers Panel
 
@@ -271,7 +272,7 @@ Stitches each tile's generated result back onto the canvas using `grid`.
 
 | Parameter | Type | Default | Description | Notes |
 |---|---|---|---|---|
-| `feather` | FLOAT 0–1 | 1.0 | Feathering strength. | Uses smoothstep curve, not linear. `0` ≈ no feathering, seams will be hard. |
+| `feather` | FLOAT 0–1 | 1.0 | Feathering strength. | Between two hand-drawn tiles **of the same layer** the transition sits in the repaintable region between their exclusion bands, width = that region × feather. On a side facing the background (`gap / fallback / unified`) it stops outward at the tile's own exclusion boundary (the weight reaches exactly 0 there, so unedited reference pixels in the locked band never enter the composite semi-transparently) and inward at the overlap midline, with the 50% point always on the hand-drawn box edge. **Rounded corners** follow the same rule as a radial ramp: center = the drawn arc's center, 50% on the arc of radius `r`, reaching 0 at `r + repaintable width` — so the corner is controlled by this node's `feather`; Split's corner feather only shapes the sampling lock. Background tiles drop no band, so their transition spans the whole overlap. `0` = hard switch at the transition's midline (the midline between the locked bands for same-layer pairs, exactly the box edge when facing the background), `0.5` = only its middle half blends, `1` = the whole repaintable region blends. Weights are complementary and never blend with the underlay. Uses smoothstep, not linear. |
 | `color_match_strength` | FLOAT 0–1 | 0.0 | Color matching strength. | **Only triggers when > 0**, and only truly works when **`tile_sources` is also connected**. Statistics use **low-weight edge pixels** (< 0.8) to avoid washing out center content. |
 | `color_protection` | BOOLEAN | False | Hue/Color Protection | When enabled, each tile is compared against its source content; color-matching adjustments are applied only to pixels that have been intentionally recolored. This preserves manual hue or color modifications while ensuring that exposure corrections remain effective. When disabled, color matching is applied to each tile as usual. |
 | `high_low_freq` | ​​BOOLEAN | False | High/Low-Frequency Blending (applies only to feathered regions) | Uses "feathered" weighting for low-frequency components to ensure smooth transitions, while employing "competitive" weighting for high-frequency components to preserve fine details—preventing details in overlapping areas from being lost due to averaging. |
@@ -279,16 +280,22 @@ Stitches each tile's generated result back onto the canvas using `grid`.
 ### Merge Algorithm
 
 1. Underlay: `original_image` scaled to `work_w × work_h`.
-2. Foreground (`kind = layer`) accumulates into fg canvas; background (`gap / fallback / unified`) accumulates into bg canvas.
-3. Normalize then composite: `base = bg * bg_alpha + original * (1 - bg_alpha)` → `merged = fg * fg_alpha + base * (1 - fg_alpha)`.
-4. Crop to `img_h × img_w` (oversampled regions are trimmed).
+2. Hand-drawn tiles drop Split's locked band via the grid's `edit_mask` (only the band itself, `≤ overlap/2`). Background tiles (`gap / fallback / unified`) drop nothing: their band holds another enhancement of the same source, so excluding it would push the weight sum below 1 and let the underlay through.
+3. A hand-drawn tile's feather transition sits between the two locked bands only **between neighbours of the same layer** (`edit_bands` from the grid plus the facing neighbour's), and its width is `overlap` minus both locked bands (`grid["overlap"]` is the only overlap source: in manual mode every sub-tile is expanded by just `overlap/2`, and same-layer sub-tiles no longer add a second overlap), so 50% lands in the middle of the two tiles' overlap. A side facing the background also starts at this tile's exclusion boundary, so the ramp never enters the locked band while the 50% point stays on the hand-drawn box edge. Weight is exactly 0 at that boundary, so the hard exclusion leaves no seam.
+4. Rounded corners use a radial ramp with the same rule: 50% on the drawn arc, 0 at `r + repaintable width`, 1 further inward, width scaled by `feather`; `feather = 0` cuts hard along the drawn arc. The expanded outline (`r + overlap/2`) no longer cuts the corner, so corners are not trimmed along the expanded arc or a square boundary.
+5. When the hand-drawn box is inset from the canvas edge (its `layer_region` is inset from the tile edge), that tile edge gets its transition back even though it touches the canvas: width = 2 × inset, 50% at the box edge. No inset (the box itself touches the edge) → no transition.
+6. Foreground (`kind = layer`) accumulates into fg canvas; background (`gap / fallback / unified`) accumulates into bg canvas.
+7. Normalize then composite: `base = bg * bg_alpha + original * (1 - bg_alpha)` → `merged = fg * fg_alpha + base * (1 - fg_alpha)`.
+8. Crop to `img_h × img_w` (oversampled regions are trimmed).
 
 ### Notes
 
 - **Without `tile_sources`, `color_match_strength` is completely ineffective**.
 - **When Split is in manual mode and `fill gaps` is not active**, not connecting `original_image` causes uncovered missing areas to show black underlay.
-- `feather = 0` equals hard stitching.
-- You can use the [Smart merge images node](https://github.com/supElement/ComfyUI_Element_easy) from another extension as a replacement; it provides better results for color and distortion correction. When connected to Split's `grid`, it also reads `mask` (rounded silhouette) and `edit_mask` (lock band), so the locked band is excluded there too.
+- `feather = 0` switches hard at the repaintable region's midline (not at the tile edge).
+- With Split's `edge mask` on, only **neighbours of the same layer** narrow the transition to the region between their locked bands; a hand-drawn tile's side facing the background starts at its own exclusion boundary with the box edge as the 50% point, so even a large `lock` cannot eat the box border or its rounded corners, and the exclusion boundary leaves no hard step. Within one layer, wider bands leave a narrower middle (per-side transition width = `overlap/2 − this tile's band`; a large `lock` can leave only a hard seam between two tiles of that layer), so widen the transition by lowering `lock`. Background tiles are unaffected and always blend across the whole overlap.
+- **Rounded corners depend only on this node's `feather`**: Split's `corner feather` merely shapes the sampling lock (ramping inward), and Merge no longer trims the corner along an expanded outline or a square boundary.
+- You can use the [Smart merge images node](https://github.com/supElement/ComfyUI_Element_easy) from another extension as a replacement; it provides better results for color and distortion correction. When connected to Split's `grid`, it reuses this node's alpha / feather geometry (centred ramps, same-layer transitions between lock bands, corner ramps around the drawn arc); hand-drawn tiles exclude their locked band and background tiles do not.
 ---
 
 ## ElementKrea2InContextPatch (Model Patch)
