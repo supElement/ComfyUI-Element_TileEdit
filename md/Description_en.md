@@ -123,6 +123,14 @@ When enabled, only edges that **have a neighbor** get a locked band (canvas bord
 - Examples: `overlap=96px, feather=24px` → `lock ≤ 50%`; `overlap=256px, feather=24px` → `lock ≤ 81%`; `overlap=512px, feather=24px` → 90% is fine.
 - Chain: Split's `tile_masks` → Encode's `tile_masks`, **required**. Encode declares this port as required, so ComfyUI errors out at queue time instead of finishing a full sampling pass before you notice the lock was inactive.
 
+---
+
+The illustration below uses Tile01 as an example, with Tile02 shown as a mirror image.
+
+<img width="2168" height="1133" alt="image" src="https://github.com/user-attachments/assets/3bf328fb-66ef-48bc-ac77-df8c6cdedacb" />
+
+---
+
 ### Model Compatibility
 
 Edge masking is not tied to Qwen Image 2.1: **any model sampled through ComfyUI's standard sampler works** (Qwen Image 2.1, Qwen Edit 2509/2511, Krea 2, FLUX.1, FLUX.2/klein, SD3.5, SDXL, …):
