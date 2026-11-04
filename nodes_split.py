@@ -23,6 +23,7 @@ import time
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image, ImageOps
 
 import comfy.utils
@@ -213,8 +214,8 @@ def _compute_manual_fades(tiles, default_ov, out_w, out_h):
 def _lock_band_mask(gen_w, gen_h, bands, feather):
     """锁边 mask：[1,h,w]，1 = 允许重绘，0 = 只作参考。
     bands = (left, top, right, bottom)，锁定带宽度（<=0 表示该边不锁）。
-    feather 可为标量或 (left, top, right, bottom)：锁定带内恒为 0，羽化全部落在带外
-    [band, band+feather]；feather <= 0 时是硬边。"""
+    feather 可为标量或 (left, top, right, bottom)：外沿恒为 0，羽化落在锁定带内部
+    [band-feather, band]；feather=band 时渐变正好覆盖整条带，不侵占带外的可重绘区。"""
     gw, gh = max(1, int(gen_w)), max(1, int(gen_h))
     if max(bands) <= 0:
         return torch.ones((1, 1, 1), dtype=torch.float32)
@@ -226,9 +227,10 @@ def _lock_band_mask(gen_w, gen_h, bands, feather):
     def _ramp(dist, band, f):
         if band <= 0:
             return None
+        f = min(max(0.0, f), band)
         if f <= 0.0:
             return (dist >= band).to(torch.float32)
-        t = ((dist - band) / f).clamp(0.0, 1.0)
+        t = ((dist - (band - f)) / f).clamp(0.0, 1.0)
         return t * t * (3.0 - 2.0 * t)
 
     xs = torch.arange(gw, dtype=torch.float32) + 0.5
@@ -253,6 +255,11 @@ def _split_region(x, y, w, h, cols, rows, ov):
     def _axis(total, n, o):
         if n == 1:
             return [(0, total)]
+        if o <= 0:
+            # 齐边切：累计取整保证相邻块首尾相接，外扩后每对相对边的距离恒等于重叠量。
+            # 若按固定 step 取整，块宽不能整除时会留下 1px 的错位，Merge 的中线就对不上。
+            b = [int(math.floor(i * total / n + 0.5)) for i in range(n + 1)]
+            return [(b[i], b[i + 1] - b[i]) for i in range(n)]
         o = min(o, total)  # 极端 overlap 下保持 step >= 0
         cw = max(1, int(math.floor((total + o * (n - 1)) / n + 0.5)))
         step = (total - cw) / (n - 1)
@@ -557,8 +564,10 @@ def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
         regions = []
 
     if not regions:
-        return [(int(r[0]), int(r[1]), int(r[2]), int(r[3]))
-                for r in _balanced_subsplit([(0, 0, out_w, out_h)], gap_max_px)]
+        out = [(int(r[0]), int(r[1]), int(r[2]), int(r[3]))
+               for r in _balanced_subsplit([(0, 0, out_w, out_h)], gap_max_px)]
+        out.sort(key=lambda r: (r[1], r[0]))
+        return out
 
     base_grid = _balanced_subsplit([(0, 0, out_w, out_h)], gap_max_px)
 
@@ -687,6 +696,8 @@ def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
             final_pieces.extend(_balanced_subsplit([p_int], gap_max_px))
         else:
             final_pieces.append(p_int)
+    # 输出顺序：先横向（同一行从左到右），再纵向（行从上到下）
+    final_pieces.sort(key=lambda r: (r[1], r[0]))
     return final_pieces
 
 
@@ -815,7 +826,7 @@ class ElementTileSplit:
         enable_lup = bool(data.get("enable_layer_upscale", False))
         enable_mask = bool(data.get("enable_mask", False))
         mask_band_pct = _clamp(float(data.get("edge_mask_pct", 90) or 0), 0.0, 100.0)
-        mask_feather = max(0.0, float(data.get("edge_mask_feather", 24) or 0))
+        mask_feather_pct = _clamp(float(data.get("edge_mask_feather", 50) or 0), 0.0, 100.0)
         layers = _norm_layers(data)
 
         source = _load_source_image(data, image)
@@ -898,14 +909,11 @@ class ElementTileSplit:
                             row[c] = True
 
             for li, (l, rg) in enumerate(layer_regions):
-                if l["cols"] > 1 or l["rows"] > 1:
-                    edge = min(rg["w"] / l["cols"], rg["h"] / l["rows"])
-                    ov = _overlap_px(ov_mode, ov_px, ov_pct, edge)
-                    ov_values.append(ov)
-                else:
-                    ov = 0
+                # 子块先齐边切开，重叠统一由 _inject_manual_overlap 提供（每块各外扩
+                # default_ov/2），这样一层拆多块时的重叠宽度和块外重叠一样 = default_ov，
+                # 不会在切块这里再多叠一份。
                 subs = _split_region(rg["x"], rg["y"], rg["w"], rg["h"],
-                                     l["cols"], l["rows"], ov)
+                                     l["cols"], l["rows"], 0)
                 for s in subs:
                     s["kind"] = "layer"
                     
@@ -969,13 +977,10 @@ class ElementTileSplit:
         if manual_mode:
             _inject_manual_overlap(tiles, default_ov, out_w, out_h)  # 加上 out_w 和 out_h
             _compute_manual_fades(tiles, default_ov, out_w, out_h)
-            grid_overlap = max(
-                (max(t.get("fade_top", 0), t.get("fade_bottom", 0),
-                     t.get("fade_left", 0), t.get("fade_right", 0))
-                 for t in tiles),
-                default=0,
-            )
-            grid_overlap = max(grid_overlap, max(ov_values) if ov_values else 0)
+            # 所有块（含同层子块）的重叠都只来自上面这一次统一外扩，每块各外扩
+            # default_ov // 2，因此网格 overlap 恒等于实际外扩出来的重叠宽度，
+            # Merge 的过渡宽度和锁边布局不必再分情况。
+            grid_overlap = 2 * max(0, default_ov // 2)
         else:
             grid_overlap = max(ov_values) if ov_values else 0
 
@@ -1004,9 +1009,12 @@ class ElementTileSplit:
                 ).permute(0, 2, 3, 1).contiguous()
             tile_images.append(crop)
 
-            # 锁边 denoise mask：只锁有邻居的边，带宽 = grid_overlap/2 × 比例
-            tile_edit_mask = None
-            if enable_mask and mask_band_pct > 0.0 and grid_overlap > 0:
+            # 锁边带宽（canvas px）先算好：倒角羽化宽度与 Merge 的过渡区都用它
+            lock_on = enable_mask and mask_band_pct > 0.0 and grid_overlap > 0
+            bands_c = (0.0, 0.0, 0.0, 0.0)
+            bands_m = [0.0, 0.0, 0.0, 0.0]
+            corner_feather = 0.0
+            if lock_on:
                 half_band = grid_overlap * 0.5 * (mask_band_pct / 100.0)
                 bands_c = (
                     min(half_band, tw * 0.45) if t.get("fade_left", 0) > 0 else 0.0,
@@ -1014,13 +1022,96 @@ class ElementTileSplit:
                     min(half_band, tw * 0.45) if t.get("fade_right", 0) > 0 else 0.0,
                     min(half_band, th * 0.45) if t.get("fade_bottom", 0) > 0 else 0.0,
                 )
-                # 采样 mask：锁定带不重绘，羽化落在带外
+                corner_feather = half_band * (mask_feather_pct / 100.0)
+
+            # 手绘块的圆角轮廓（canvas 像素坐标）：Merge 用硬轮廓，采样锁边用带 feather 的轮廓
+            tile_mask = None
+            tile_lock_sil = None
+            if t.get("kind") == "layer":
+                rtl = int(t.get("radius_tl", 0))
+                rtr = int(t.get("radius_tr", 0))
+                rbl = int(t.get("radius_bl", 0))
+                rbr = int(t.get("radius_br", 0))
+                if rtl or rtr or rbl or rbr:
+                    lx, ly, lw, lh = t["layer_region"]
+                    bx2, by2 = lx + lw, ly + lh
+
+                    # 膨胀量 = _inject_manual_overlap 里用的 half
+                    half = max(0, default_ov // 2)
+
+                    ys = torch.arange(th, dtype=torch.float32) + 0.5 + ty
+                    xs = torch.arange(tw, dtype=torch.float32) + 0.5 + tx
+                    yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+
+                    # 膨胀框（直边外扩 half）
+                    dx0, dy0 = lx - half, ly - half
+                    dx1, dy1 = bx2 + half, by2 + half
+                    rect_b = (xx >= dx0) & (xx <= dx1) & (yy >= dy0) & (yy <= dy1)
+                    mask_b = rect_b.clone()
+                    sil_f = torch.ones_like(xx, dtype=torch.float32)
+
+                    # 合并用的硬轮廓：膨胀圆角，圆心不变、半径 r + half
+                    for r, cx, cy, cond in (
+                        (rtl, lx + rtl, ly + rtl, (xx < lx + rtl) & (yy < ly + rtl)),
+                        (rtr, bx2 - rtr, ly + rtr, (xx > bx2 - rtr) & (yy < ly + rtr)),
+                        (rbl, lx + rbl, by2 - rbl, (xx < lx + rbl) & (yy > by2 - rbl)),
+                        (rbr, bx2 - rbr, by2 - rbr, (xx > bx2 - rbr) & (yy > by2 - rbr)),
+                    ):
+                        if r <= 0:
+                            continue
+                        d = (r + half) - torch.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+                        mask_b &= ~(cond & (d < 0))
+
+                    # 采样锁边轮廓：把膨胀轮廓按锁定带宽内缩（同心圆：圆心不变，半径减带宽）。
+                    # 这样倒角处的锁定带与直边等宽，而不是整个倒角被切掉一大片。
+                    # 一个角涉及两条边，任一边有带宽就按较大的那条内缩（贴画布边的一侧带宽为 0）。
+                    # 轮廓内侧全为 1（可重绘），羽化落在轮廓外的锁定区。
+                    bl, bt, br, bb = bands_c
+                    for r, cx, cy, cond, bcorner in (
+                        (rtl, lx + rtl, ly + rtl,
+                         (xx < lx + rtl) & (yy < ly + rtl), max(bl, bt)),
+                        (rtr, bx2 - rtr, ly + rtr,
+                         (xx > bx2 - rtr) & (yy < ly + rtr), max(br, bt)),
+                        (rbl, lx + rbl, by2 - rbl,
+                         (xx < lx + rbl) & (yy > by2 - rbl), max(bl, bb)),
+                        (rbr, bx2 - rbr, by2 - rbr,
+                         (xx > bx2 - rbr) & (yy > by2 - rbr), max(br, bb)),
+                    ):
+                        if r <= 0:
+                            continue
+                        r_in = (r + half) - bcorner
+                        if r_in <= 0:
+                            sil_f = torch.where(cond, torch.zeros_like(sil_f), sil_f)
+                            continue
+                        d = r_in - torch.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+                        if corner_feather > 1e-6:
+                            u = ((d + corner_feather) / corner_feather).clamp(0.0, 1.0)
+                            ramp = u * u * (3.0 - 2.0 * u)
+                        else:
+                            ramp = (d >= 0).to(torch.float32)
+                        sil_f = torch.where(cond, torch.minimum(sil_f, ramp), sil_f)
+
+                    tile_mask = mask_b.float().unsqueeze(0).unsqueeze(-1)
+                    tile_lock_sil = torch.where(rect_b, sil_f, torch.zeros_like(sil_f)) \
+                        .unsqueeze(0).unsqueeze(-1)
+
+            # 锁边 denoise mask：只锁有邻居的边，带宽 = grid_overlap/2 × 比例
+            tile_edit_mask = None
+            if lock_on:
+                # 采样 mask：羽化落在锁定带内部，不侵占带外的可重绘区
                 sx = gen_w / max(1, tw)
                 sy = gen_h / max(1, th)
                 bands_g = (bands_c[0] * sx, bands_c[1] * sy, bands_c[2] * sx, bands_c[3] * sy)
-                tile_masks.append(_lock_band_mask(gen_w, gen_h, bands_g,
-                                                 mask_feather * (sx + sy) * 0.5))
-                # 合并 mask：锁定带 + 羽化整段剔除（这段要么没重绘，要么只被部分重绘）。
+                feather_g = tuple(b * mask_feather_pct / 100.0 for b in bands_g)
+                lock = _lock_band_mask(gen_w, gen_h, bands_g, feather_g)
+                # 倒角以外同样锁定，且随 feather 在倒角内侧渐入（不是硬切）
+                if tile_lock_sil is not None:
+                    sil = tile_lock_sil.permute(0, 3, 1, 2)
+                    if sil.shape[-2] != gen_h or sil.shape[-1] != gen_w:
+                        sil = F.interpolate(sil, size=(gen_h, gen_w), mode="bilinear", align_corners=False)
+                    lock = torch.minimum(lock.unsqueeze(1), sil.clamp(0.0, 1.0)).squeeze(1)
+                tile_masks.append(lock)
+                # 合并 mask：只剔除锁定带本身（羽化已在带内，不需要再加 feather）。
                 # 相邻两块在同一 overlap 内各剔一侧，两侧剔除宽度相加不能超过重叠宽度，
                 # 否则中间会出现无人认领的黑缝；每边最多剔到 overlap/2-1。
                 # 剔除边界处的内容已经完全重绘，硬切即可，过渡交给 Merge 的 feather。
@@ -1031,56 +1122,12 @@ class ElementTileSplit:
                     if b <= 0 or fade <= 0:
                         continue
                     half_fade = fade * 0.5
-                    want = b + mask_feather
-                    bands_m[ei] = min(want, max(0.0, half_fade - 1.0))
-                    if want > half_fade + 1e-6:
+                    bands_m[ei] = min(b, max(0.0, half_fade - 1.0))
+                    if b > half_fade - 1.0 + 1e-6:
                         mask_clamped = True
                 tile_edit_mask = _lock_band_mask(tw, th, tuple(bands_m), 0.0)
             else:
                 tile_masks.append(torch.ones((1, 1, 1), dtype=torch.float32))
-
-            # 【新增】生成当前分块（含重叠区）基于绝对画布坐标的 Mask
-            tile_mask = None
-            if t.get("kind") == "layer":
-                rtl = int(t.get("radius_tl", 0))
-                rtr = int(t.get("radius_tr", 0))
-                rbl = int(t.get("radius_bl", 0))
-                rbr = int(t.get("radius_br", 0))
-                if rtl or rtr or rbl or rbr:
-                    lx, ly, lw, lh = t["layer_region"]
-                    bx2, by2 = lx + lw, ly + lh
-            
-                    # 膨胀量 = _inject_manual_overlap 里用的 half
-                    half = max(0, default_ov // 2)
-            
-                    ys = torch.arange(th, dtype=torch.float32) + 0.5 + ty
-                    xs = torch.arange(tw, dtype=torch.float32) + 0.5 + tx
-                    yy, xx = torch.meshgrid(ys, xs, indexing="ij")
-            
-                    # 膨胀框（直边外扩 half）
-                    dx0, dy0 = lx - half, ly - half
-                    dx1, dy1 = bx2 + half, by2 + half
-                    mask_b = (xx >= dx0) & (xx <= dx1) & (yy >= dy0) & (yy <= dy1)
-            
-                    # 膨胀圆角：圆心不变，半径 r + half；超出即挖掉
-                    if rtl > 0:
-                        cx, cy = lx + rtl, ly + rtl
-                        m = (xx < cx) & (yy < cy)
-                        mask_b &= ~(m & ((xx - cx)**2 + (yy - cy)**2 > (rtl + half)**2))
-                    if rtr > 0:
-                        cx, cy = bx2 - rtr, ly + rtr
-                        m = (xx > cx) & (yy < cy)
-                        mask_b &= ~(m & ((xx - cx)**2 + (yy - cy)**2 > (rtr + half)**2))
-                    if rbl > 0:
-                        cx, cy = lx + rbl, by2 - rbl
-                        m = (xx < cx) & (yy > cy)
-                        mask_b &= ~(m & ((xx - cx)**2 + (yy - cy)**2 > (rbl + half)**2))
-                    if rbr > 0:
-                        cx, cy = bx2 - rbr, by2 - rbr
-                        m = (xx > cx) & (yy > cy)
-                        mask_b &= ~(m & ((xx - cx)**2 + (yy - cy)**2 > (rbr + half)**2))
-            
-                    tile_mask = mask_b.float().unsqueeze(0).unsqueeze(-1)
 
             grid_tiles.append({
                 "x": tx, "y": ty, "width": tw, "height": th,
@@ -1098,7 +1145,10 @@ class ElementTileSplit:
                 "radius_br": t.get("radius_br", 0),
                 "layer_region": t.get("layer_region"),
                 "mask": tile_mask, # 将算好的像素级 mask 传入 grid
+                "corner_feather": float(corner_feather),  # 倒角柔化宽度（canvas px），Merge 用它模糊圆角
                 "edit_mask": tile_edit_mask,  # 锁边带 = 0，合并时剔除
+                "lock_bands": tuple(bands_c),  # 各边锁定带宽（canvas px），采样锁边用
+                "edit_bands": tuple(bands_m),  # 合并时真正剔除的带宽，Merge 的过渡区用它对齐
                 "touch_left": tx == 0,
                 "touch_top": ty == 0,
                 "touch_right": tx + tw >= out_w,
@@ -1107,9 +1157,9 @@ class ElementTileSplit:
             pbar.update_absolute(idx + 1, len(tiles))
 
         if mask_clamped:
-            logging.warning("[TileSplit] lock band + feather exceeds half of the tile overlap; "
-                            "Merge exclusion was capped at overlap/2. Reduce edge_mask_pct/feather "
-                            "or increase overlap to keep the band fully excluded.")
+            logging.warning("[TileSplit] lock band reaches the tile overlap midline; "
+                            "Merge exclusion was capped at overlap/2 - 1px. "
+                            "Reduce edge_mask_pct or increase overlap.")
 
         grid = {
             "tiles": grid_tiles,

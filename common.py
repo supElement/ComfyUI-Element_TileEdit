@@ -831,44 +831,66 @@ def _tile_weight(info, feather, device, dtype, centered=False):
     """2-D weight map for one tile, as the outer product of its two axis ramps.
 
     centered=False: fade 从分块边缘就开始，宽度 = fade × feather（旧行为）。
-    centered=True : 过渡带以重叠区中线为中心，宽度 = fade × feather；
-                    feather=1 时铺满整个重叠区，feather=0 时正好在中线硬切。
+    centered=True : 过渡带落在两块都真正重绘过的区间内，宽度 = (fade − 两侧锁定带) × feather；
+                    feather=1 时铺满整段可重绘重叠区，feather=0 时在它的中线硬切。
+                    info["blend_pads"] = ((near, far), ...)（按 left/top/right/bottom）
+                    给出该边被锁定带排除的宽度：near = 本块，far = 对侧邻块。
     """
     if centered:
-        ramp_y = _centered_axis_ramp(info["height"], info["fade_top"], info["fade_bottom"], feather, device, dtype)
-        ramp_x = _centered_axis_ramp(info["width"], info["fade_left"], info["fade_right"], feather, device, dtype)
+        pads = info.get("blend_pads") or ((0.0, 0.0),) * 4
+        ramp_y = _centered_axis_ramp(info["height"], info["fade_top"], info["fade_bottom"], feather,
+                                     device, dtype, pads[1], pads[3])
+        ramp_x = _centered_axis_ramp(info["width"], info["fade_left"], info["fade_right"], feather,
+                                     device, dtype, pads[0], pads[2])
     else:
         ramp_y = _axis_ramp(info["height"], round(info["fade_top"] * feather), round(info["fade_bottom"] * feather), device, dtype)
         ramp_x = _axis_ramp(info["width"], round(info["fade_left"] * feather), round(info["fade_right"] * feather), device, dtype)
     return (ramp_y.unsqueeze(1) * ramp_x.unsqueeze(0)).unsqueeze(0).unsqueeze(-1)
 
 
-def _centered_axis_ramp(size, fade_start, fade_end, feather, device, dtype):
-    """1-D 权重：两侧过渡带都以重叠区中线为中心，宽度 = fade × feather。
+def _centered_axis_ramp(size, fade_start, fade_end, feather, device, dtype,
+                        pads_start=(0.0, 0.0), pads_end=(0.0, 0.0)):
+    """1-D 权重：过渡带落在可重绘区里，50% 落在 fade/2 处。
 
-    以右侧边为例，令 d = 到该边的距离：d < (fade-w)/2 时权重 0，随后在宽度 w 内
-    升到 1，再往里恒为 1。相邻两块同宽互补，重叠区内权重之和恰为 1。
+    pads_start/pads_end = (near, far)：near 是本块该边被 Merge 剔除的锁定带宽度，
+    far 是相邻分块对侧边的剔除宽度。过渡带向块外止于 near（剔除边界处权重正好
+    归零，锁边带边界不会留下硬切），向块内止于 fade − far；宽度再乘 feather：
+    feather=0 在 fade/2 处硬切，feather=1 铺满整段可重绘区。两侧参数对称时相邻两块
+    的权重在重叠区内互补；pads 全为 0 时退化为以 fade/2 为中心、宽度 = fade × feather。
     """
     if fade_start + fade_end > size:
-        scale = size / (fade_start + fade_end)
-        fade_start = int(fade_start * scale)
-        fade_end = int(fade_end * scale)
+        scale = size / float(fade_start + fade_end)
+        fade_start *= scale
+        fade_end *= scale
+        pads_start = tuple(p * scale for p in pads_start)
+        pads_end = tuple(p * scale for p in pads_end)
 
     f = max(0.0, min(1.0, float(feather)))
     idx = torch.arange(size, device=device, dtype=torch.float32)
 
-    def side(fade, flipped):
+    def side(fade, flipped, pads):
         if fade <= 0:
             return torch.ones(size, device=device, dtype=dtype)
-        d = (size - 1 - idx) if flipped else idx
-        w = fade * f
-        off = (fade - w) * 0.5
-        if w <= 1e-6:
-            return (d >= off).to(dtype)
-        t = ((d - off) / w).clamp(0.0, 1.0)
+        # 到像素中心到该边的距离：相邻两块在重叠区内 d_near + d_far 恰好等于 fade
+        d = (size - 0.5 - idx) if flipped else (idx + 0.5)
+        near = max(0.0, float(pads[0]))
+        far = max(0.0, float(pads[1]))
+        if near + far > fade:
+            # 两侧剔除带已经铺满重叠区：等比收窄，两块在中点处硬接，不留无人认领的缝
+            s = fade / (near + far) if fade > 0 else 0.0
+            near, far = near * s, far * s
+        mid = fade * 0.5
+        a_out = max(0.0, mid - near)          # 手绘框边 -> 剔除边界
+        a_in = max(0.0, fade - far - mid)     # 手绘框边 -> 对侧剔除带
+        x = d - mid                           # >0 = 分块内侧
+        if f <= 1e-6:
+            return (x >= 0).to(dtype)
+        hw = torch.where(x >= 0, torch.full_like(x, a_in),
+                         torch.full_like(x, a_out)) * f
+        t = (0.5 + x / (2.0 * hw.clamp(min=1e-6))).clamp(0.0, 1.0)
         return (t * t * (3.0 - 2.0 * t)).to(dtype)
 
-    return side(fade_start, False) * side(fade_end, True)
+    return side(fade_start, False, pads_start) * side(fade_end, True, pads_end)
 
 
 def _resolve_geometry(width, height, tile_size, overlap, alignment):

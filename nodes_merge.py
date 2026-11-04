@@ -659,8 +659,22 @@ def _generate_tile_mask(w, h, rtl, rtr, rbl, rbr, device, dtype):
     return mask.float().unsqueeze(0).unsqueeze(-1).to(dtype)
 
 
+_BG_KINDS = {"gap", "fallback", "unified"}
+
+
+def _is_bg(info):
+    """背景块：锁定带里放的是同一底图的低增强版本，不是“未编辑”的内容。"""
+    return info.get("kind") in _BG_KINDS
+
+
 def _apply_edit_mask(weight, info, device, dtype):
-    """乘上 split 的锁边 edit_mask：锁边带权重清零，合并时只取真正重绘过的内容。"""
+    """乘上 split 的锁边 edit_mask：锁边带权重清零，合并时只取真正重绘过的内容。
+
+    背景块不剔除：它们的锁定带只是同一底图换了个增强版本，参与混合只是变柔；
+    一剔除权重和就 < 1，反而把底图透出来，feather 也会变成硬切。
+    """
+    if _is_bg(info):
+        return weight
     edit_mask = info.get("edit_mask")
     if edit_mask is None:
         return weight
@@ -682,6 +696,159 @@ def _apply_edit_mask(weight, info, device, dtype):
     return weight * edit_mask.clamp(0.0, 1.0)
 
 
+def _apply_corner_ramp(weight, info, overlap, feather, device, dtype):
+    """手绘框圆角：把两条轴向斜坡的乘积换成以手绘圆弧为中心的径向斜坡。
+
+    和直边同一条规则：50% 落在手绘轮廓上（这里是半径 r 的圆弧），向外到剔除边界
+    （r + 直边可用宽度）收敛到 0，向内到 r − 对侧可用宽度升到 1；宽度再乘 feather，
+    feather=0 就在圆弧上硬切。外扩轮廓（r + overlap/2）不再参与切边——它在权重已经
+    归零之后，锁定带里未重绘的参考像素不会被半透明地带进合成，倒角处也就不会出现
+    旧行为那种按外扩圆角/方块边界硬切的效果。
+    只有两侧都有过渡（fade > 0）的角才处理；贴画布边、没有外扩的角保持原样。
+    """
+    lr = info.get("layer_region")
+    if not lr:
+        return weight
+    radii = [int(info.get(k, 0) or 0) for k in
+             ("radius_tl", "radius_tr", "radius_bl", "radius_br")]
+    if max(radii) <= 0:
+        return weight
+    half = float(overlap) * 0.5
+    if half <= 0.0:
+        return weight
+
+    tx, ty, tw, th = info["x"], info["y"], info["width"], info["height"]
+    lx, ly, lw, lh = lr
+    bx2, by2 = lx + lw, ly + lh
+    f = max(0.0, min(1.0, float(feather)))
+    pads = info.get("blend_pads") or ((0.0, 0.0),) * 4
+    fades = [float(info.get(k, 0) or 0) for k in
+             ("fade_left", "fade_top", "fade_right", "fade_bottom")]
+
+    def avail(edge):
+        fade = fades[edge]
+        if fade <= 0:
+            return None
+        near, far = float(pads[edge][0]), float(pads[edge][1])
+        mid = fade * 0.5
+        return max(0.0, mid - near), max(0.0, fade - far - mid)
+
+    corners = (
+        (radii[0], lx + radii[0], ly + radii[0], 0, 1, "tl"),
+        (radii[1], bx2 - radii[1], ly + radii[1], 2, 1, "tr"),
+        (radii[2], lx + radii[2], by2 - radii[2], 0, 3, "bl"),
+        (radii[3], bx2 - radii[3], by2 - radii[3], 2, 3, "br"),
+    )
+    for r, cx, cy, e_h, e_v, where in corners:
+        if r <= 0:
+            continue
+        ah, av = avail(e_h), avail(e_v)
+        if ah is None or av is None:
+            continue
+        a_out = min(ah[0], av[0])
+        a_in = min(ah[1], av[1])
+        reach = r + a_out
+
+        x0 = max(0, int(cx - reach - tx) - 2)
+        x1 = min(tw, int(cx + reach - tx) + 3)
+        y0 = max(0, int(cy - reach - ty) - 2)
+        y1 = min(th, int(cy + reach - ty) + 3)
+        if x0 >= x1 or y0 >= y1:
+            continue
+
+        yy, xx = torch.meshgrid(
+            torch.arange(ty + y0, ty + y1, device=device, dtype=torch.float32) + 0.5,
+            torch.arange(tx + x0, tx + x1, device=device, dtype=torch.float32) + 0.5,
+            indexing="ij")
+        dist = torch.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        xin = r - dist                          # >0 = 在圆弧内侧
+        if f <= 1e-6:
+            alpha = (xin >= 0).to(torch.float32)
+        else:
+            hw = torch.where(xin >= 0, torch.full_like(xin, a_in),
+                             torch.full_like(xin, a_out)) * f
+            t = (0.5 + xin / (2.0 * hw.clamp(min=1e-6))).clamp(0.0, 1.0)
+            alpha = t * t * (3.0 - 2.0 * t)
+
+        if where == "tl":
+            cond = (xx < cx) & (yy < cy)
+        elif where == "tr":
+            cond = (xx > cx) & (yy < cy)
+        elif where == "bl":
+            cond = (xx < cx) & (yy > cy)
+        else:
+            cond = (xx > cx) & (yy > cy)
+
+        a = torch.where(cond, alpha, torch.ones_like(alpha)).unsqueeze(0).unsqueeze(-1)
+        weight[:, y0:y1, x0:x1, :] = torch.minimum(
+            weight[:, y0:y1, x0:x1, :], a.to(dtype=dtype))
+    return weight
+
+
+def _lock_band(info, edge):
+    """合并时该边实际剔除的带宽（canvas px）；0 = 不剔除。
+
+    优先用 edit_bands（= Split 生成 edit_mask 时真正清零的宽度）；
+    过渡区按它布局，权重斜坡才落在仍有图像内容的重绘区内，倒角弧线才切得出来。
+    """
+    bands = info.get("edit_bands") or info.get("lock_bands")
+    if not bands:
+        return 0.0
+    try:
+        return max(0.0, float(bands[edge]))
+    except (TypeError, IndexError, ValueError):
+        return 0.0
+
+
+def _blend_pads(tiles, overlap):
+    """同层手绘块之间的配对：每块四条边的 (near, far)。
+
+    near 恒等于本块锁定带宽度，far = 对侧邻块朝本块的锁定带宽（对背景块一律为 0：
+    背景不剔除锁定带，权重由背景画布自己归一化）。只有同一 `layer` 的两块手绘块才
+    配对——不同层是各自 alpha-over，不需要权重互补。过渡宽度对两种邻接都是
+    `overlap`（Split 的 manual 模式所有块统一外扩 overlap/2，同层子块之间也一样）。
+    返回列表与 tiles 同序，每条边按 (left, top, right, bottom) 给出 (near, far)。
+    """
+    n = len(tiles)
+    if n == 0:
+        return []
+    own = [tuple(0.0 if _is_bg(t) else _lock_band(t, e) for e in range(4)) for t in tiles]
+    out = []
+    for i, t in enumerate(tiles):
+        xi, yi, wi, hi = t["x"], t["y"], t["width"], t["height"]
+        # near 恒为本块锁定带：即使对面是背景块、或根本没有同层邻块，斜坡也从
+        # 剔除边界归零，锁边带里未重绘的参考像素不会被半透明地带进合成。
+        pads = [(own[i][e], 0.0) for e in range(4)]
+        best = [None] * 4   # 邻块在垂直方向的重叠长度
+        for j, o in enumerate(tiles):
+            if j == i or _is_bg(t) or _is_bg(o):
+                continue
+            if t.get("layer") != o.get("layer"):
+                continue
+            xj, yj, wj, hj = o["x"], o["y"], o["width"], o["height"]
+            y_over = min(yi + hi, yj + hj) - max(yi, yj)
+            x_over = min(xi + wi, xj + wj) - max(xi, xj)
+            if x_over <= 0 or y_over <= 0:
+                continue
+            cands = []
+            if xj > xi:   # 邻块在右 -> 本块右边(2) 对 邻块左边(0)
+                cands.append((2, y_over, own[j][0]))
+            if xj < xi:   # 邻块在左 -> 本块左边(0) 对 邻块右边(2)
+                cands.append((0, y_over, own[j][2]))
+            if yj > yi:   # 邻块在下 -> 本块下边(3) 对 邻块上边(1)
+                cands.append((3, x_over, own[j][1]))
+            if yj < yi:   # 邻块在上 -> 本块上边(1) 对 邻块下边(3)
+                cands.append((1, x_over, own[j][3]))
+            for edge, olap, far_b in cands:
+                if best[edge] is None or olap > best[edge][0] + 1e-6:
+                    best[edge] = (olap, far_b)
+        for edge in range(4):
+            if best[edge] is not None:
+                pads[edge] = (own[i][edge], best[edge][1])
+        out.append(tuple((float(a), float(b)) for a, b in pads))
+    return out
+
+
 class ElementTileMerge:
     CATEGORY = "Element TileEdit"
     RETURN_TYPES = ("IMAGE",)
@@ -695,9 +862,11 @@ class ElementTileMerge:
                 "tile_images": ("IMAGE",),
                 "grid": (GRID_TYPE,),
                 "feather": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Transition width as a fraction of the overlap, centered on the overlap midline: "
-                               "0 = hard switch exactly at the midline, 0.5 = only the middle half of the overlap blends, "
-                               "1 = the whole overlap blends."}),
+                    "tooltip": "Transition width. Between two hand-drawn tiles of the same layer it is the repaintable middle "
+                               "between their lock bands (when Split's edge mask is on); on a side facing the background it stops "
+                               "at this tile's lock band while the 50% point stays on the hand-drawn box edge, and rounded corners "
+                               "ramp radially around the drawn arc. "
+                               "0 = hard switch at the midline, 0.5 = the middle half blends, 1 = the whole repaintable region blends."}),
                 "color_match_strength": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "color_protection": ("BOOLEAN", {"default": False,
                     "label_on": "true", "label_off": "false",
@@ -728,6 +897,7 @@ class ElementTileMerge:
         work_h, work_w = grid["work_h"], grid["work_w"]
         channels = grid["channels"]
         overlap = grid["overlap"]
+        blend_pads = _blend_pads(tiles, overlap)
 
         base_canvas = None
         if original_image is not None:
@@ -768,15 +938,19 @@ class ElementTileMerge:
         if high_low_freq:
             weight_max_bg = torch.zeros(1, work_h, work_w, 1, device=device, dtype=dtype)
             weight_max_layers = {}
-            for info_wm in tiles:
+            for idx_wm, info_wm in enumerate(tiles):
                 is_fg_wm = info_wm.get("kind") not in {"gap", "fallback", "unified"}
                 info_wm_copy = dict(info_wm)
+                info_wm_copy["blend_pads"] = blend_pads[idx_wm]
                 if overlap > 0:
                     if info_wm_copy.get("fade_top", 0) > 0:    info_wm_copy["fade_top"]    = overlap
                     if info_wm_copy.get("fade_bottom", 0) > 0: info_wm_copy["fade_bottom"] = overlap
                     if info_wm_copy.get("fade_left", 0) > 0:   info_wm_copy["fade_left"]   = overlap
                     if info_wm_copy.get("fade_right", 0) > 0:  info_wm_copy["fade_right"]  = overlap
                 w_full = _tile_weight(info_wm_copy, feather, device, dtype, centered=True)
+                if is_fg_wm:
+                    w_full = _apply_corner_ramp(w_full, info_wm_copy, overlap, feather,
+                                                device, dtype)
                 w_full = _apply_edit_mask(w_full, info_wm, device, dtype)
                 xw, yw = info_wm["x"], info_wm["y"]
                 ww, hw = info_wm["width"], info_wm["height"]
@@ -816,7 +990,7 @@ class ElementTileMerge:
         else:
             common_shift = None
 
-        for info, decoded, src in triples:
+        for idx, (info, decoded, src) in enumerate(triples):
             if decoded.ndim == 3: decoded = decoded.unsqueeze(0)
             decoded = decoded[:1].to(device=device, dtype=dtype)
             decoded = _match_channels(decoded, channels)
@@ -833,19 +1007,34 @@ class ElementTileMerge:
                     src = F.interpolate(src.permute(0, 3, 1, 2), size=(h, w), mode="bilinear", align_corners=False).permute(0, 2, 3, 1)
 
             # 2. 计算基础权重
-            # 【修改】只对内部重叠的边(fade > 0)强制拉满到 overlap(96px)，贴边的边(fade = 0)坚决不动
+            info = dict(info)
+            info["blend_pads"] = blend_pads[idx]
+            is_fg = info.get("kind") not in {"gap", "fallback", "unified"}
             if overlap > 0:
-                info = dict(info)
                 if info.get("fade_top", 0) > 0:    info["fade_top"] = overlap
                 if info.get("fade_bottom", 0) > 0: info["fade_bottom"] = overlap
                 if info.get("fade_left", 0) > 0:   info["fade_left"] = overlap
                 if info.get("fade_right", 0) > 0:  info["fade_right"] = overlap
-                
+                # 手绘框贴到画布边时 split 把 fade 置 0（该边没有邻块）；但手绘框本身
+                # 离画布边还有一段外扩留白时，这条边仍需要过渡，否则元素会多长出一截、
+                # 圆角也失去纵向收口。过渡宽 = 2 × 留白，50% 正好落在手绘框边上。
+                lr = info.get("layer_region") if is_fg else None
+                if lr:
+                    for key, inset in (
+                        ("fade_left",   lr[0] - x),
+                        ("fade_top",    lr[1] - y),
+                        ("fade_right",  (x + w) - (lr[0] + lr[2])),
+                        ("fade_bottom", (y + h) - (lr[1] + lr[3])),
+                    ):
+                        if info.get(key, 0) <= 0 and inset > 1:
+                            info[key] = min(overlap, 2.0 * inset)
+
             weight = _tile_weight(info, feather, device, dtype, centered=True)
+            if is_fg:
+                weight = _apply_corner_ramp(weight, info, overlap, feather, device, dtype)
             weight = _apply_edit_mask(weight, info, device, dtype)
 
             # 3. 获取 split 传过来的像素级 Mask
-            is_fg = info.get("kind") not in {"gap", "fallback", "unified"}
             tile_mask = info.get("mask")
             if tile_mask is not None:
                 tile_mask = tile_mask.to(device=device, dtype=dtype)
@@ -878,8 +1067,14 @@ class ElementTileMerge:
             
             # 5. 【Pad 之后】对硬 Mask 进行羽化模糊
             if tile_mask is not None:
-                max_fade = max(info.get("fade_top", 0), info.get("fade_bottom", 0), info.get("fade_left", 0), info.get("fade_right", 0))
-                feather_px = max(1.0, max_fade * float(feather)) if max_fade > 0 else max(1.0, overlap * float(feather))
+                # 倒角柔化宽度用 Split 导出的 corner_feather（画布 px）。不能按 overlap 算：
+                # overlap 越大（如 200px）模糊范围越宽，倒角会被糊成一整段渐变，看起来像没有倒角。
+                corner_feather = float(info.get("corner_feather", 0.0) or 0.0)
+                if corner_feather > 1e-6:
+                    feather_px = max(1.0, corner_feather)
+                else:
+                    max_fade = max(info.get("fade_top", 0), info.get("fade_bottom", 0), info.get("fade_left", 0), info.get("fade_right", 0))
+                    feather_px = max(1.0, max_fade * float(feather)) if max_fade > 0 else max(1.0, overlap * float(feather))
                 
                 if feather_px > 1.0:
                     sigma = feather_px / 3.0
