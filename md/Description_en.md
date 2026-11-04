@@ -125,7 +125,7 @@ When enabled, only edges that **have a neighbor** get a locked band (canvas bord
 
 ---
 
-The illustration below uses Tile01 as an example, with Tile02 shown as a mirror image.
+The illustration below uses Tile01 as an example, with Tile02 being a mirrored version. The "feather" indication applies only to the Split node; for a Merge node, the feathering is calculated by extending values ​​from the center line toward both sides.
 
 <img width="2168" height="1133" alt="image" src="https://github.com/user-attachments/assets/3bf328fb-66ef-48bc-ac77-df8c6cdedacb" />
 
