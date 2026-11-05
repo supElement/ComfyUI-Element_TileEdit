@@ -668,11 +668,7 @@ def _is_bg(info):
 
 
 def _apply_edit_mask(weight, info, device, dtype):
-    """乘上 split 的锁边 edit_mask：锁边带权重清零，合并时只取真正重绘过的内容。
-
-    背景块不剔除：它们的锁定带只是同一底图换了个增强版本，参与混合只是变柔；
-    一剔除权重和就 < 1，反而把底图透出来，feather 也会变成硬切。
-    """
+    """乘上锁边 edit_mask：减掉未重绘区。背景块不剔除，否则权重和 < 1 会透底。"""
     if _is_bg(info):
         return weight
     edit_mask = info.get("edit_mask")
@@ -697,15 +693,8 @@ def _apply_edit_mask(weight, info, device, dtype):
 
 
 def _apply_corner_ramp(weight, info, overlap, feather, device, dtype):
-    """手绘框圆角：把两条轴向斜坡的乘积换成以手绘圆弧为中心的径向斜坡。
-
-    和直边同一条规则：50% 落在手绘轮廓上（这里是半径 r 的圆弧），向外到剔除边界
-    （r + 直边可用宽度）收敛到 0，向内到 r − 对侧可用宽度升到 1；宽度再乘 feather，
-    feather=0 就在圆弧上硬切。外扩轮廓（r + overlap/2）不再参与切边——它在权重已经
-    归零之后，锁定带里未重绘的参考像素不会被半透明地带进合成，倒角处也就不会出现
-    旧行为那种按外扩圆角/方块边界硬切的效果。
-    只有两侧都有过渡（fade > 0）的角才处理；贴画布边、没有外扩的角保持原样。
-    """
+    """圆角权重：内部角按到圆弧的距离径向渐变（与直边同一套 a_in/a_out），
+    贴画布边的角用外扩软轮廓模糊后取最小。"""
     lr = info.get("layer_region")
     if not lr:
         return weight
@@ -726,12 +715,19 @@ def _apply_corner_ramp(weight, info, overlap, feather, device, dtype):
              ("fade_left", "fade_top", "fade_right", "fade_bottom")]
 
     def avail(edge):
+        # 与 _centered_axis_ramp 同宽：手绘边到剔除边界的距离
         fade = fades[edge]
-        if fade <= 0:
-            return None
         near, far = float(pads[edge][0]), float(pads[edge][1])
         mid = fade * 0.5
         return max(0.0, mid - near), max(0.0, fade - far - mid)
+
+    cf = float(info.get("corner_feather", 0.0) or 0.0)
+    if cf > 1e-6:
+        sil_feather = max(1.0, cf)
+    else:
+        sil_feather = max(1.0, 0.5 * max(fades) * f, 0.5 * float(overlap) * f)
+    sil_sigma = sil_feather / 3.0
+    sil_pad = max(1, int(round(sil_sigma * 3.0)))
 
     corners = (
         (radii[0], lx + radii[0], ly + radii[0], 0, 1, "tl"),
@@ -742,13 +738,60 @@ def _apply_corner_ramp(weight, info, overlap, feather, device, dtype):
     for r, cx, cy, e_h, e_v, where in corners:
         if r <= 0:
             continue
-        ah, av = avail(e_h), avail(e_v)
-        if ah is None or av is None:
-            continue
-        a_out = min(ah[0], av[0])
-        a_in = min(ah[1], av[1])
-        reach = r + a_out
 
+        if fades[e_h] <= 0 and fades[e_v] <= 0:
+            # 贴画布边：手绘圆弧按 tile mask 的 sigma 模糊，边界补 0，50% 落在手绘弧上
+            wide = r + sil_feather + sil_pad + 2
+            if where in ("tl", "bl"):
+                x_lo, x_hi = cx - wide, cx + sil_pad + 2
+            else:
+                x_lo, x_hi = cx - sil_pad - 2, cx + wide
+            if where in ("tl", "tr"):
+                y_lo, y_hi = cy - wide, cy + sil_pad + 2
+            else:
+                y_lo, y_hi = cy - sil_pad - 2, cy + wide
+            wx0, wx1 = int(x_lo), int(x_hi) + 1
+            wy0, wy1 = int(y_lo), int(y_hi) + 1
+            x0, x1 = max(0, wx0 - tx), min(tw, wx1 - tx)
+            y0, y1 = max(0, wy0 - ty), min(th, wy1 - ty)
+            if x0 >= x1 or y0 >= y1:
+                continue
+
+            yy, xx = torch.meshgrid(
+                torch.arange(wy0, wy1, device=device, dtype=torch.float32) + 0.5,
+                torch.arange(wx0, wx1, device=device, dtype=torch.float32) + 0.5,
+                indexing="ij")
+            dist = torch.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+            keep = (dist <= float(r)).to(torch.float32)[None, None]
+            keep = F.pad(keep, (sil_pad, sil_pad, sil_pad, sil_pad))
+            keep = _gaussian_blur_isotropic(keep, sil_sigma)
+            keep = keep[0, 0, sil_pad + (y0 + ty - wy0):sil_pad + (y1 + ty - wy0),
+                             sil_pad + (x0 + tx - wx0):sil_pad + (x1 + tx - wx0)]
+
+            yy, xx = torch.meshgrid(
+                torch.arange(ty + y0, ty + y1, device=device, dtype=torch.float32) + 0.5,
+                torch.arange(tx + x0, tx + x1, device=device, dtype=torch.float32) + 0.5,
+                indexing="ij")
+
+            if where == "tl":
+                cond = (xx < cx) & (yy < cy)
+            elif where == "tr":
+                cond = (xx > cx) & (yy < cy)
+            elif where == "bl":
+                cond = (xx < cx) & (yy > cy)
+            else:
+                cond = (xx > cx) & (yy > cy)
+            a = torch.where(cond, keep, torch.ones_like(keep)).unsqueeze(0).unsqueeze(-1)
+            weight[:, y0:y1, x0:x1, :] = torch.minimum(
+                weight[:, y0:y1, x0:x1, :], a.to(dtype=dtype))
+            continue
+
+        ah, av = avail(e_h), avail(e_v)
+        if fades[e_h] <= 0:
+            ah = av
+        elif fades[e_v] <= 0:
+            av = ah
+        reach = r + max(ah[0], av[0])
         x0 = max(0, int(cx - reach - tx) - 2)
         x1 = min(tw, int(cx + reach - tx) + 3)
         y0 = max(0, int(cy - reach - ty) - 2)
@@ -761,12 +804,18 @@ def _apply_corner_ramp(weight, info, overlap, feather, device, dtype):
             torch.arange(tx + x0, tx + x1, device=device, dtype=torch.float32) + 0.5,
             indexing="ij")
         dist = torch.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
-        xin = r - dist                          # >0 = 在圆弧内侧
+        xin = r - dist
         if f <= 1e-6:
             alpha = (xin >= 0).to(torch.float32)
         else:
-            hw = torch.where(xin >= 0, torch.full_like(xin, a_in),
-                             torch.full_like(xin, a_out)) * f
+            # 两个切点各用自己的直边宽度，沿圆弧插值，切线处才接得上
+            u = (xx - cx).abs()
+            v = (yy - cy).abs()
+            s = v / (u + v).clamp(min=1e-6)
+            s = s * s * (3.0 - 2.0 * s)
+            w_in = ah[1] + (av[1] - ah[1]) * s
+            w_out = ah[0] + (av[0] - ah[0]) * s
+            hw = torch.where(xin >= 0, w_in, w_out) * f
             t = (0.5 + xin / (2.0 * hw.clamp(min=1e-6))).clamp(0.0, 1.0)
             alpha = t * t * (3.0 - 2.0 * t)
 
@@ -779,18 +828,15 @@ def _apply_corner_ramp(weight, info, overlap, feather, device, dtype):
         else:
             cond = (xx > cx) & (yy > cy)
 
-        a = torch.where(cond, alpha, torch.ones_like(alpha)).unsqueeze(0).unsqueeze(-1)
-        weight[:, y0:y1, x0:x1, :] = torch.minimum(
-            weight[:, y0:y1, x0:x1, :], a.to(dtype=dtype))
+        weight[:, y0:y1, x0:x1, :] = torch.where(
+            cond.unsqueeze(0).unsqueeze(-1),
+            alpha.unsqueeze(0).unsqueeze(-1).to(dtype=dtype),
+            weight[:, y0:y1, x0:x1, :])
     return weight
 
 
 def _lock_band(info, edge):
-    """合并时该边实际剔除的带宽（canvas px）；0 = 不剔除。
-
-    优先用 edit_bands（= Split 生成 edit_mask 时真正清零的宽度）；
-    过渡区按它布局，权重斜坡才落在仍有图像内容的重绘区内，倒角弧线才切得出来。
-    """
+    """合并时该边实际剔除的带宽（canvas px）；0 = 不剔除。"""
     bands = info.get("edit_bands") or info.get("lock_bands")
     if not bands:
         return 0.0
@@ -801,14 +847,7 @@ def _lock_band(info, edge):
 
 
 def _blend_pads(tiles, overlap):
-    """同层手绘块之间的配对：每块四条边的 (near, far)。
-
-    near 恒等于本块锁定带宽度，far = 对侧邻块朝本块的锁定带宽（对背景块一律为 0：
-    背景不剔除锁定带，权重由背景画布自己归一化）。只有同一 `layer` 的两块手绘块才
-    配对——不同层是各自 alpha-over，不需要权重互补。过渡宽度对两种邻接都是
-    `overlap`（Split 的 manual 模式所有块统一外扩 overlap/2，同层子块之间也一样）。
-    返回列表与 tiles 同序，每条边按 (left, top, right, bottom) 给出 (near, far)。
-    """
+    """每块四条边的 (near, far)：near = 本块锁定带，far = 同层对侧邻块的锁定带。"""
     n = len(tiles)
     if n == 0:
         return []
@@ -816,8 +855,6 @@ def _blend_pads(tiles, overlap):
     out = []
     for i, t in enumerate(tiles):
         xi, yi, wi, hi = t["x"], t["y"], t["width"], t["height"]
-        # near 恒为本块锁定带：即使对面是背景块、或根本没有同层邻块，斜坡也从
-        # 剔除边界归零，锁边带里未重绘的参考像素不会被半透明地带进合成。
         pads = [(own[i][e], 0.0) for e in range(4)]
         best = [None] * 4   # 邻块在垂直方向的重叠长度
         for j, o in enumerate(tiles):
@@ -1015,9 +1052,7 @@ class ElementTileMerge:
                 if info.get("fade_bottom", 0) > 0: info["fade_bottom"] = overlap
                 if info.get("fade_left", 0) > 0:   info["fade_left"] = overlap
                 if info.get("fade_right", 0) > 0:  info["fade_right"] = overlap
-                # 手绘框贴到画布边时 split 把 fade 置 0（该边没有邻块）；但手绘框本身
-                # 离画布边还有一段外扩留白时，这条边仍需要过渡，否则元素会多长出一截、
-                # 圆角也失去纵向收口。过渡宽 = 2 × 留白，50% 正好落在手绘框边上。
+                # 贴画布边的 fade 被 split 置 0；留白侧仍需过渡，宽 = 2 × 留白
                 lr = info.get("layer_region") if is_fg else None
                 if lr:
                     for key, inset in (
@@ -1067,8 +1102,7 @@ class ElementTileMerge:
             
             # 5. 【Pad 之后】对硬 Mask 进行羽化模糊
             if tile_mask is not None:
-                # 倒角柔化宽度用 Split 导出的 corner_feather（画布 px）。不能按 overlap 算：
-                # overlap 越大（如 200px）模糊范围越宽，倒角会被糊成一整段渐变，看起来像没有倒角。
+                # 用 Split 导出的 corner_feather；按 overlap 算会随 overlap 变大糊掉倒角
                 corner_feather = float(info.get("corner_feather", 0.0) or 0.0)
                 if corner_feather > 1e-6:
                     feather_px = max(1.0, corner_feather)
