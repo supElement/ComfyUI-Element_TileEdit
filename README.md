@@ -154,7 +154,8 @@
 ## 常见问题
 
 **怎么用？**  
-- workflow文件夹中已提供相关工作流。  
+- workflow文件夹中已提供相关工作流。
+- 其中 ElementTiledUpscale_Qwenimage2.1_Split_UseGenerateText.json 工作流演示了如何使用 ComfyUI 自带的 Generate Text 节点对简短提示词进行自动扩写和润色。不过，由于需要运行本地 LLM，这会明显增加生成时间。
 
 **怎么手动分割？**
 
