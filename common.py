@@ -296,7 +296,8 @@ def _drop_refs_no_cache(executor, args, kwargs):
     if kind == "kwargs":
         opts = dict(kwargs["transformer_options"])
         opts["qwen_image21_cache"] = {"device": "off"}
-        kwargs = dict(kwargs); kwargs["transformer_options"] = opts
+        kwargs = dict(kwargs)
+        kwargs["transformer_options"] = opts
     elif kind == "args":
         opts = dict(args[slot])
         opts["qwen_image21_cache"] = {"device": "off"}

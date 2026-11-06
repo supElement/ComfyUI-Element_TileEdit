@@ -300,8 +300,10 @@ def _balanced_subsplit(rects, gap_max_px):
     out = []
     for (rx, ry, rw, rh) in rects:
         if rw <= gap_max_px and rh <= gap_max_px:
-            out.append((rx, ry, rw, rh)); continue
-        max_sc = max(1, math.ceil(rw / gap_max_px)); max_sr = max(1, math.ceil(rh / gap_max_px))
+            out.append((rx, ry, rw, rh))
+            continue
+        max_sc = max(1, math.ceil(rw / gap_max_px))
+        max_sr = max(1, math.ceil(rh / gap_max_px))
         best = None
         for sc in range(1, max_sc + 1):
             sw = math.ceil(rw / sc)
@@ -398,8 +400,10 @@ def _subtract_single_cut(p, R):
     px, py, pw, ph = p
     pb, pr = py + ph, px + pw
 
-    ox = max(px, R["x"]); oy = max(py, R["y"])
-    ox2 = min(pr, R["x"] + R["w"]); oy2 = min(pb, R["y"] + R["h"])
+    ox = max(px, R["x"])
+    oy = max(py, R["y"])
+    ox2 = min(pr, R["x"] + R["w"])
+    oy2 = min(pb, R["y"] + R["h"])
     if ox >= ox2 or oy >= oy2:
         return p
 
@@ -432,37 +436,59 @@ def _subtract_single_cut(p, R):
     if not (cov_top or cov_bottom or cov_left or cov_right):
         return p
 
-    best_area = float("inf"); best_type = None; best_cut = 0.0
+    best_area = float("inf")
+    best_type = None
+    best_cut = 0.0
 
     if cov_top:
         cut_y = min(_get_bottom_y(px, R), _get_bottom_y(pr, R))
         cut_y = max(float(py), min(float(pb), cut_y))
         area = pw * (pb - cut_y)
-        if 0 <= area < best_area: best_area = area; best_type = 'top'; best_cut = cut_y
+        if 0 <= area < best_area:
+            best_area = area
+            best_type = 'top'
+            best_cut = cut_y
     if cov_bottom:
         cut_y = max(_get_top_y(px, R), _get_top_y(pr, R))
         cut_y = max(float(py), min(float(pb), cut_y))
         area = pw * (cut_y - py)
-        if 0 <= area < best_area: best_area = area; best_type = 'bottom'; best_cut = cut_y
+        if 0 <= area < best_area:
+            best_area = area
+            best_type = 'bottom'
+            best_cut = cut_y
     if cov_left:
         cut_x = min(_get_right_x(py, R), _get_right_x(pb, R))
         cut_x = max(float(px), min(float(pr), cut_x))
         area = ph * (pr - cut_x)
-        if 0 <= area < best_area: best_area = area; best_type = 'left'; best_cut = cut_x
+        if 0 <= area < best_area:
+            best_area = area
+            best_type = 'left'
+            best_cut = cut_x
     if cov_right:
         cut_x = max(_get_left_x(py, R), _get_left_x(pb, R))
         cut_x = max(float(px), min(float(pr), cut_x))
         area = ph * (cut_x - px)
-        if 0 <= area < best_area: best_area = area; best_type = 'right'; best_cut = cut_x
+        if 0 <= area < best_area:
+            best_area = area
+            best_type = 'right'
+            best_cut = cut_x
 
     if best_type is None:
         return p
 
     nx, ny, nw, nh = float(px), float(py), float(pw), float(ph)
-    if best_type == 'top':    ny = best_cut; nh = pb - best_cut
-    elif best_type == 'bottom': ny = py;     nh = best_cut - py
-    elif best_type == 'left':   nx = best_cut; nw = pr - best_cut
-    elif best_type == 'right':  nx = px;       nw = best_cut - px
+    if best_type == 'top':
+        ny = best_cut
+        nh = pb - best_cut
+    elif best_type == 'bottom':
+        ny = py
+        nh = best_cut - py
+    elif best_type == 'left':
+        nx = best_cut
+        nw = pr - best_cut
+    elif best_type == 'right':
+        nx = px
+        nw = best_cut - px
 
     if nw <= 0 or nh <= 0:
         return None
@@ -494,20 +520,28 @@ def _rect_intersects_rounded_rect(rect, R):
         return (nx - cx) ** 2 + (ny - cy) ** 2 < r * r
 
     if rtl > 0:
-        cx = R["x"] + rtl; cy = R["y"] + rtl
-        nx = max(rx, min(cx, rx2)); ny = max(ry, min(cy, ry2))
+        cx = R["x"] + rtl
+        cy = R["y"] + rtl
+        nx = max(rx, min(cx, rx2))
+        ny = max(ry, min(cy, ry2))
         if nx <= cx and ny <= cy and circle_intersects(cx, cy, rtl): return True
     if rtr > 0:
-        cx = R["x"] + R["w"] - rtr; cy = R["y"] + rtr
-        nx = max(rx, min(cx, rx2)); ny = max(ry, min(cy, ry2))
+        cx = R["x"] + R["w"] - rtr
+        cy = R["y"] + rtr
+        nx = max(rx, min(cx, rx2))
+        ny = max(ry, min(cy, ry2))
         if nx >= cx and ny <= cy and circle_intersects(cx, cy, rtr): return True
     if rbl > 0:
-        cx = R["x"] + rbl; cy = R["y"] + R["h"] - rbl
-        nx = max(rx, min(cx, rx2)); ny = max(ry, min(cy, ry2))
+        cx = R["x"] + rbl
+        cy = R["y"] + R["h"] - rbl
+        nx = max(rx, min(cx, rx2))
+        ny = max(ry, min(cy, ry2))
         if nx <= cx and ny >= cy and circle_intersects(cx, cy, rbl): return True
     if rbr > 0:
-        cx = R["x"] + R["w"] - rbr; cy = R["y"] + R["h"] - rbr
-        nx = max(rx, min(cx, rx2)); ny = max(ry, min(cy, ry2))
+        cx = R["x"] + R["w"] - rbr
+        cy = R["y"] + R["h"] - rbr
+        nx = max(rx, min(cx, rx2))
+        ny = max(ry, min(cy, ry2))
         if nx >= cx and ny >= cy and circle_intersects(cx, cy, rbr): return True
     return False
 
@@ -616,7 +650,8 @@ def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
 
             if best_j >= 0:
                 qx, qy, qw, qh = pieces[best_j]
-                nx = min(x, qx); ny = min(y, qy)
+                nx = min(x, qx)
+                ny = min(y, qy)
                 nx_end = max(x + w, qx + qw)
                 ny_end = max(y + h, qy + qh)
                 pieces[i] = (nx, ny, nx_end - nx, ny_end - ny)
@@ -665,8 +700,10 @@ def _plan_gap_tiles(covered, div, out_w, out_h, gap_max_px, overlap_px=0,
                         if i == j or pieces[j] is None:
                             continue
                         qx, qy, qw, qh = pieces[j]
-                        ix = max(bx, qx); iy = max(by, qy)
-                        ix2 = min(bx + bw, qx + qw); iy2 = min(by + bh, qy + qh)
+                        ix = max(bx, qx)
+                        iy = max(by, qy)
+                        ix2 = min(bx + bw, qx + qw)
+                        iy2 = min(by + bh, qy + qh)
                         if ix >= ix2 - 0.1 or iy >= iy2 - 0.1:
                             continue
                         if (qx < bx - 0.1 or qy < by - 0.1 or
