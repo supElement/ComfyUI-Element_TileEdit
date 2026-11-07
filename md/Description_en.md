@@ -101,8 +101,8 @@ Pure geometric splitting + image source intake, no model dependency. At executio
 | `▶` | — | Run up to this node only (isolated prompt). | Doesn't run downstream, only for preview. |
 | `📂` | — | Upload a local image. | — |
 | `by Manual / by count / by size` | Manual | Switch mode. | Switching doesn't lose hand-drawn box data, but it's **inactive** when in count/size mode. |
-| `Div` | 16 | Alignment base (2–256, step 2). | Usually leave alone. All coordinates/sizes snap to this. |
-| `U-upscale` | 2.0 | Unified upscale factor (0.1–16). | Output canvas = source × this, ceil-aligned to `div`. |
+| `Div` | 16 | Alignment base (2–256, step 2). | Usually leave alone. All coordinates/sizes snap to this; **the input image itself does not need to be divisible by `div`**. |
+| `U-upscale` | 2.0 | Unified upscale factor (0.1–16). | Output size = `round(source × this)`, independent of `div`; the tile canvas is ceil-aligned to `div` internally only, and the generation resolution is rounded to `div`. |
 | `Cols / Rows` | 2 / 2 | Count mode rows/columns. | Only active in count mode. |
 | `tile` | 1024 | Target size in size mode. | Only active in size mode. |
 | `overlap px / %` | 64px | Overlap. Click `px` / `%` buttons to switch units. | Both values are kept; only the currently active unit takes effect. **No upper cap** — whatever you enter is used. |
@@ -191,6 +191,9 @@ Edge masking is not tied to Qwen Image 2.1: **any model sampled through ComfyUI'
 ### Output Notes
 
 - `split_images` has already been edge-extended to `gen_w × gen_h`.
+- **The input image does not need to be divisible by `div`**: the canvas is ceil-aligned to `div` and any excess edge is absorbed by shifting the edge tile inward as a whole (its crop comes entirely from real pixels); only a single whole-image tile that is flush with the canvas edge and cannot shift is padded with replicated edge pixels up to the canvas size, and Merge still crops back to the real size.
+- **The Merge output size is always `round(source × U-upscale)`**: at `U-upscale = 1.0` it matches the original image size exactly, with no extra pixels from `div` rounding.
+- **`div` only constrains each tile's generation resolution**: tiled blocks use `round_div(crop × upscale)`; a single whole-image tile is generated at the canvas size (1924 → 1936) and cropped back to 1924. The generation resolution is always a multiple of `div`, but it never changes the output size.
 - Total tile count limit `MAX_TILES = 256`; exceeding it raises an error.
 - If the backend finds no tiles, it degrades to "single whole-canvas tile" and logs a warning.
 
@@ -266,7 +269,7 @@ Stitches each tile's generated result back onto the canvas using `grid`.
 
 | Port | Type | Description |
 |---|---|---|
-| `IMAGE` | IMAGE | Merged result. |
+| `IMAGE` | IMAGE | Merged result. Size = `round(source × Split's U-upscale)`; at `U-upscale = 1.0` it matches the original image size exactly. |
 
 ### Parameters
 
