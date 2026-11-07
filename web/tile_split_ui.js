@@ -1201,6 +1201,12 @@ class TileSplitUI {
     const s = this.state;
     return [snapCeil(this.srcW * s.unified.upscale, s.div), snapCeil(this.srcH * s.unified.upscale, s.div)];
   }
+  // 真实输出尺寸：后端 Merge 按它裁剪，不受 div 向上取整影响
+  outImageSize() {
+    const s = this.state;
+    return [Math.max(1, Math.round(this.srcW * s.unified.upscale)),
+            Math.max(1, Math.round(this.srcH * s.unified.upscale))];
+  }
   layerRegionOut(l) {
     const s = this.state, up = s.unified.upscale, div = s.div;
     const [ow, oh] = this.outCanvasSize();
@@ -1651,7 +1657,7 @@ Ctrl + drag on canvas to draw a layer box</div>`;
     
     this.listEl.innerHTML = html;
     this.countEl.textContent = this.srcW
-      ? `${this.totalTileCount()} tiles · ${this.outCanvasSize().join("×")}px`
+      ? `${this.totalTileCount()} tiles · ${this.outImageSize().join("×")}px`
       : "no image loaded";
 
     if (manual) this.listEl.querySelectorAll("canvas[data-thumb]").forEach(cv => {
