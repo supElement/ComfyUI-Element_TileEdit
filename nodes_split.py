@@ -10,7 +10,7 @@
 
 坐标系约定：
 - 框/层坐标 = 源图像素空间（前端画布所见即所得，吸附 div）
-- region/tile 坐标 = 输出画布空间（源 × unified_upscale，ceil 对齐 div），merge 直接贴回
+- region/tile 坐标 = 输出画布空间（源 × unified_upscale，ceil 对齐 div）；超出真实输出尺寸的边缘块向内平移（贴边整幅单块用边缘复制补边），merge 裁回真实尺寸
 - gen（生成分辨率）= 源区域 × 该层 upscale，div 取整（VAE 合法尺寸，可超采样）
 """
 
@@ -128,17 +128,20 @@ def _overlap_px(mode, px_val, pct_val, tile_edge):
 
 def _inject_manual_overlap(tiles, default_ov, out_w, out_h):
     """对所有块（手绘框和背景块）强制向外扩展 default_ov/2。
-    因为每个块都往外扩了，所以边界必定产生物理重叠，Merge 节点才能正确羽化。"""
+    因为每个块都往外扩了，所以边界必定产生物理重叠，Merge 节点才能正确羽化。
+    已越过真实输出尺寸的块（整幅单块）不回夹，避免把补边后的块压回。"""
     if default_ov <= 0: return
     half = max(0, default_ov // 2)
     if half == 0: return
     
     for t in tiles:
-        # 无论 layer 还是 gap，统一向外扩展，并限制在画布内
+        # 无论 layer 还是 gap，统一向外扩展，并限制在画布内；已越过真实输出的块不再回夹
+        lim_w = max(out_w, t["x"] + t["width"])
+        lim_h = max(out_h, t["y"] + t["height"])
         nx = max(0, t["x"] - half)
         ny = max(0, t["y"] - half)
-        nw = min(out_w - nx, t["width"] + (t["x"] - nx) + half)
-        nh = min(out_h - ny, t["height"] + (t["y"] - ny) + half)
+        nw = min(lim_w - nx, t["width"] + (t["x"] - nx) + half)
+        nh = min(lim_h - ny, t["height"] + (t["y"] - ny) + half)
         
         t["x"] = nx
         t["y"] = ny
@@ -869,6 +872,10 @@ class ElementTileSplit:
         source = _load_source_image(data, image)
         _, src_h, src_w, channels = source.shape
 
+        # 画布按 div 上取整会略大于真实输出尺寸；边缘块不补外部像素，
+        # 而是整块向画面内平移，合并后再裁回真实尺寸。
+        exact_w = max(1, int(round(src_w * u_up)))
+        exact_h = max(1, int(round(src_h * u_up)))
         out_w = _snap_ceil(src_w * u_up, div)
         out_h = _snap_ceil(src_h * u_up, div)
 
@@ -1007,13 +1014,23 @@ class ElementTileSplit:
             emit([{"x": 0, "y": 0, "w": out_w, "h": out_h,
                    "col": 0, "row": 0, "kind": "fallback"}])
 
+        # 超出真实输出尺寸的边缘块整块向画面内平移（缺多少补多少），crop 全来自真实像素；
+        # 已贴到画布边、无法再内移的块（整幅单块）保留画布尺寸，crop 用边缘像素复制补齐。
+        for t in tiles:
+            over_x = t["x"] + t["width"] - exact_w
+            if over_x > 0:
+                t["x"] = max(0, t["x"] - over_x)
+            over_y = t["y"] + t["height"] - exact_h
+            if over_y > 0:
+                t["y"] = max(0, t["y"] - over_y)
+
         if len(tiles) > MAX_TILES:
             raise ValueError(f"ElementTileSplit: {len(tiles)} tiles exceed MAX_TILES={MAX_TILES}.")
 
         # ---- manual 模式收尾：为所有 tile 计算 fade 值 + 网格 overlap ----
         if manual_mode:
-            _inject_manual_overlap(tiles, default_ov, out_w, out_h)  # 加上 out_w 和 out_h
-            _compute_manual_fades(tiles, default_ov, out_w, out_h)
+            _inject_manual_overlap(tiles, default_ov, exact_w, exact_h)
+            _compute_manual_fades(tiles, default_ov, exact_w, exact_h)
             # 所有块（含同层子块）的重叠都只来自上面这一次统一外扩，每块各外扩
             # default_ov // 2，因此网格 overlap 恒等于实际外扩出来的重叠宽度，
             # Merge 的过渡宽度和锁边布局不必再分情况。
@@ -1033,9 +1050,18 @@ class ElementTileSplit:
             up = t["upscale"]
             cx = _clamp(int(round(tx / u_up)), 0, src_w - 1)
             cy = _clamp(int(round(ty / u_up)), 0, src_h - 1)
-            cw = _clamp(int(round(tw / u_up)), 1, src_w - cx)
-            ch = _clamp(int(round(th / u_up)), 1, src_h - cy)
-            crop = source[:, cy:cy + ch, cx:cx + cw, :].contiguous()
+            if tx + tw > exact_w or ty + th > exact_h:
+                # 整幅单块：按画布矩形取 crop，缺的像素用边缘复制补齐
+                cw = max(1, int(round(tw / u_up)))
+                ch = max(1, int(round(th / u_up)))
+                avail = source[:, cy:cy + min(ch, src_h - cy),
+                               cx:cx + min(cw, src_w - cx), :].contiguous()
+                crop = F.pad(avail, (0, 0, 0, cw - avail.shape[2],
+                                     0, ch - avail.shape[1]), mode="replicate")
+            else:
+                cw = _clamp(int(round(tw / u_up)), 1, src_w - cx)
+                ch = _clamp(int(round(th / u_up)), 1, src_h - cy)
+                crop = source[:, cy:cy + ch, cx:cx + cw, :].contiguous()
 
             gen_w = _clamp(_round_div(cw * up, div), div, 8192)
             gen_h = _clamp(_round_div(ch * up, div), div, 8192)
@@ -1188,8 +1214,8 @@ class ElementTileSplit:
                 "edit_bands": tuple(bands_m),  # 合并时真正剔除的带宽，Merge 的过渡区用它对齐
                 "touch_left": tx == 0,
                 "touch_top": ty == 0,
-                "touch_right": tx + tw >= out_w,
-                "touch_bottom": ty + th >= out_h,
+                "touch_right": tx + tw >= exact_w,
+                "touch_bottom": ty + th >= exact_h,
             })
             pbar.update_absolute(idx + 1, len(tiles))
 
@@ -1203,6 +1229,7 @@ class ElementTileSplit:
             "num_x": 0, "num_y": 0,          
             "img_h": out_h, "img_w": out_w,
             "work_h": out_h, "work_w": out_w,
+            "exact_h": exact_h, "exact_w": exact_w,
             "overlap": grid_overlap,
             "tile_size": 0,
             "alignment": div,
@@ -1220,7 +1247,8 @@ class ElementTileSplit:
             ui["preview"] = pref
 
 
-        logging.info("[TileSplit] mode=%s | %d tile(s) | canvas %dx%d (div=%d, unified=%.2fx)",
-                     mode, len(tiles), out_w, out_h, div, u_up)
+        logging.info("[TileSplit] mode=%s | %d tile(s) | canvas %dx%d -> output %dx%d "
+                     "(div=%d, unified=%.2fx)",
+                     mode, len(tiles), out_w, out_h, exact_w, exact_h, div, u_up)
         return {"ui": ui, "result": (tile_images, source, prompts, negatives, grid, tile_masks)}
 

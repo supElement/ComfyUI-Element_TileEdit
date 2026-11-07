@@ -1238,6 +1238,8 @@ class ElementTileMerge:
                 layer_alpha = lw.clamp(0.0, 1.0)
             merged = layer_img * layer_alpha + merged * (1.0 - layer_alpha)
 
-        img_h, img_w = grid["img_h"], grid["img_w"]
+        # 画布按 div 上取整，最终输出裁回真实尺寸（分块生成分辨率仍按 div 对齐）
+        img_h = int(grid.get("exact_h") or grid["img_h"])
+        img_w = int(grid.get("exact_w") or grid["img_w"])
         return (merged[:, :img_h, :img_w, :].clamp(0.0, 1.0).to(device=dst_device),)
 
