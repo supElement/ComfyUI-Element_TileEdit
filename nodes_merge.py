@@ -899,26 +899,17 @@ class ElementTileMerge:
                 "tile_images": ("IMAGE",),
                 "grid": (GRID_TYPE,),
                 "feather": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Transition width. Between two hand-drawn tiles of the same layer it is the repaintable middle "
-                               "between their lock bands (when Split's edge mask is on); on a side facing the background it stops "
-                               "at this tile's lock band while the 50% point stays on the hand-drawn box edge, and rounded corners "
-                               "ramp radially around the drawn arc. "
-                               "0 = hard switch at the midline, 0.5 = the middle half blends, 1 = the whole repaintable region blends."}),
+                    "tooltip": "Blend width: 0 = hard cut, 1 = full blend. Corners ramp along the drawn arc."}),
                 "color_match_strength": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "color_protection": ("BOOLEAN", {"default": False,
                     "label_on": "true", "label_off": "false",
-                    "tooltip": "On: compare each tile against its source and only damp color matching where the pixels were intentionally recolored, "
-                               "so hand-painted hue/color edits survive while exposure fixes still apply. "
-                               "Off: color match every tile as usual."}),
+                    "tooltip": "Keep intentional recoloring; only match exposure/white-balance drift."}),
             },
             "optional": {
-                "tile_sources": ("IMAGE", {"tooltip": "The unedited split tiles, same order as tile_images. Used as the color reference "
-                                                       "and to tell intentional recoloring apart from exposure/white-balance drift; "
-                                                       "without it color matching is skipped."}),
-                "original_image": ("IMAGE", {"tooltip": "Full original image used as an underlay for canvas areas not covered by any tile."}),
+                "tile_sources": ("IMAGE", {"tooltip": "Unedited split tiles, same order as tile_images. Required for color matching."}),
+                "original_image": ("IMAGE", {"tooltip": "Used to fill canvas areas not covered by any tile."}),
                 "high_low_freq": ("BOOLEAN", {"default": False,
-                    "tooltip": "Enable high-low frequency fusion: use feathered weights to smooth the transition for low frequencies, "
-                               " and competitive weights to preserve details for high frequencies—preventing details in overlapping regions from being flattened out through averaging."}),
+                    "tooltip": "Feather low frequencies, compete on high frequencies to keep overlap details sharp."}),
             },
         }
 
