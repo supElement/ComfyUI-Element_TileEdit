@@ -135,6 +135,18 @@ def _is_moss_image(model):
         return False
     return _is_moss_dm(dm)
 
+
+def _is_minimax_image(model):
+    """MiniMax-H3-Image / p-h3-image（无音频流的单图 DiT）。参考不走
+    reference_latents，而是 conditioning 的 minimax_refs 字典列表，由
+    core 的 extra_conds 打包成 minimax_payload 里的 ref_img 段。pdd_sigmas
+    只存在于图像模型，类名兜底。"""
+    try:
+        dm = model.get_model_object("diffusion_model")
+    except Exception:
+        return False
+    return hasattr(dm, "pdd_sigmas") or "minimaxh3imagemodel" in type(dm).__name__.lower()
+
 # ---------------------------------------------------------------------------
 # reference_strength 每步调度
 # 语义：强度列表与 steps 一一对应。第 i 次模型前向（第 i 个采样步，0 起）取
@@ -198,17 +210,23 @@ class _StepSchedule:
 def _refs_are_present(refs):
     """判断本步是否带有参考。Krea2-conditioning 链里 ref_latents 由 Patch 的
     extra_conds 以 CONDList 注入，到达 wrapper 时可能尚未解包成张量列表，
-    因此除 None 之外一律按"有参考"处理，避免误判为无参考而透传。"""
+    因此除 None 之外一律按"有参考"处理，避免误判为无参考而透传。
+    MiniMax 的参考在 minimax_payload 字典的 refs 里。"""
     if refs is None:
         return False
     if torch.is_tensor(refs):
         return True
     if isinstance(refs, (list, tuple)):
         return len(refs) > 0
+    if isinstance(refs, dict):
+        return bool(refs.get("refs"))
     return True    
 
 
 def _find_ref_slot(args, kwargs):
+    payload = kwargs.get("minimax_payload")
+    if isinstance(payload, dict) and payload.get("refs"):
+        return ("minimax", "minimax_payload")
     if kwargs.get("ref_kv") is not None:
         return ("kwargs", "ref_kv")
     for key in ("ref_latents", "reference_latents"):
@@ -231,6 +249,18 @@ def _set_refs(args, kwargs, kind, slot, value):
         kwargs = dict(kwargs)
         kwargs["ref_states"] = None
         kwargs["ref_shapes"] = None
+        return args, kwargs
+    if kind == "minimax":
+        # 参考已由 extra_conds 打包进 payload：摘除 refs 后必须同时清掉
+        # cond_video_latents 与预建 layout，否则序列长度与参考行数不一致。
+        payload = dict(kwargs[slot])
+        payload.pop("layout", None)
+        keyframes = payload.get("keyframes") or []
+        payload["cond_video_latents"] = [kf["latent"] for kf in keyframes if kf.get("latent") is not None]
+        payload["cond_audio_latents"] = [kf["audio_latent"] for kf in keyframes if kf.get("audio_latent") is not None]
+        payload["refs"] = []
+        kwargs = dict(kwargs)
+        kwargs[slot] = payload
         return args, kwargs
     if kind == "args":
         return args[:slot] + (value,) + args[slot + 1:], kwargs
@@ -323,7 +353,7 @@ def _scheduled_ref_model(model, strength_schedule):
     schedule = _StepSchedule(values)
     patched = model.clone()
     # state = {"flux3_logged": False}
-    state = {"flux3_logged": False, "moss_checked": False, "is_moss": False}
+    state = {"flux3_logged": False, "moss_checked": False, "is_moss": False, "minimax_logged": False}
     safe_strip = _noref_cache_bypass_needed()   # 核心有 bug 才隔离缓存
 
     def wrapper(executor, x, timesteps, context, *args, **kwargs):
@@ -331,6 +361,7 @@ def _scheduled_ref_model(model, strength_schedule):
         # QwenImageTransformer2DModel 把 ref_latents 按位置参数传入
         # (.execute(x, t, ctx, attn_mask, ref_latents, ...)，位于 args[1])，
         # _find_ref_slot 的 list/5D 张量分支均可命中；5D x 同样合法。
+        # MiniMax H3 视频模型把 AV latent 当 list 传进来，不可进入本调度。
 
         #------------debug-------------
         # if not state.get("slot_logged"):
@@ -339,7 +370,7 @@ def _scheduled_ref_model(model, strength_schedule):
                          # kind, slot)
         #-------------------------------
         
-        if kind is None or x.ndim not in (4, 5):
+        if kind is None or getattr(x, "ndim", None) not in (4, 5):
             return executor(x, timesteps, context, *args, **kwargs)
         if kind == "flux3":
             refs = kwargs["ref_states"]   
@@ -348,6 +379,12 @@ def _scheduled_ref_model(model, strength_schedule):
                 logging.info("[TileSchedule] FLUX.3 inference-mode fast path engaged "
                              "(refs arrive as preprocessed ref_states); per-step "
                              "reference strength control active.")
+        elif kind == "minimax":
+            refs = kwargs[slot]
+            if not state["minimax_logged"]:
+                state["minimax_logged"] = True
+                logging.info("[TileSchedule] MiniMax-H3-Image references ride in "
+                             "minimax_payload; per-step reference strength strips refs.")
         else:
             refs = args[slot] if kind == "args" else kwargs[slot]
         if not _refs_are_present(refs):
@@ -610,13 +647,74 @@ def _grounded_conditioning(clip, prompt, image, grounding_px):
             for entry in conditioning]
 
 
+# MiniMax-H3-Image：Qwen 看 1024 短边，VAE 参考落在 1024–2048 短边（core 的
+# IMAGE_REF_SHORT_EDGE / IMAGE_REF_VAE_MAX_SHORT_EDGE），画布按 32 对齐。
+# p-h3-image 用面积规则（vision ≤1MP，参考按目标面积）且短提示要补 edit 前缀。
+_MINIMAX_IMAGE_SHORT_EDGE = 1024
+_MINIMAX_IMAGE_VAE_SHORT_EDGE = 2048
+_MINIMAX_PH3_VISION_PIXELS = 1000000
+_MINIMAX_IMAGE_ALIGN = 32
+_MINIMAX_EDIT_VERBATIM = re.compile(r"\s*(Edit <Picture \d+>|subject_definitions:)")
+
+
+def _minimax_ref_size(width, height, low, high):
+    """等比缩放让短边落在 [low, high]，按 32 对齐（core _size_short_edge 同规则）。"""
+    short = max(1, min(width, height))
+    scale = min(max(short, low), high) / short
+    return (max(_MINIMAX_IMAGE_ALIGN, round(width * scale / _MINIMAX_IMAGE_ALIGN) * _MINIMAX_IMAGE_ALIGN),
+            max(_MINIMAX_IMAGE_ALIGN, round(height * scale / _MINIMAX_IMAGE_ALIGN) * _MINIMAX_IMAGE_ALIGN))
+
+
+def _minimax_area_size(width, height, pixels):
+    """等比缩小到面积不超过 pixels（不放大），按 32 对齐（core _size_within_area 同规则）。"""
+    scale = min(1.0, math.sqrt(pixels / max(1, width * height)))
+    return (max(_MINIMAX_IMAGE_ALIGN, round(width * scale / _MINIMAX_IMAGE_ALIGN) * _MINIMAX_IMAGE_ALIGN),
+            max(_MINIMAX_IMAGE_ALIGN, round(height * scale / _MINIMAX_IMAGE_ALIGN) * _MINIMAX_IMAGE_ALIGN))
+
+
+def _minimax_rgb(pixels, width, height):
+    """BCHW 的 RGBA→RGB（白底合成）并按 lanczos 缩放，返回 BHWC。"""
+    rgb = pixels[:1, :, :, :3].movedim(-1, 1)
+    if pixels.shape[-1] > 3:
+        alpha = pixels[:1, :, :, 3:].movedim(-1, 1)
+        rgb = rgb * alpha + (1.0 - alpha)
+    rgb = comfy.utils.common_upscale(rgb, width, height, "lanczos", "disabled")
+    return rgb.movedim(1, -1)
+
+
 def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_px,
                                      reference_method=None, encode_negative=False, qwen21=False,
                                      global_pixels=None, global_ref_latent=None, negative_prompt="",
-                                     krea2=False):
+                                     krea2=False, minimax=False):
     samples = tile_pixels[:1].movedim(-1, 1)
     dual = global_pixels is not None and global_ref_latent is not None
-    if krea2:
+    if minimax:
+        # MiniMax-H3-Image：参考走 conditioning 的 minimax_refs（core 每步原样
+        # 重注入），vision 槽同时以 "Picture 1: " + 图像块喂给 Qwen3-VL。目标块
+        # 自身始终是 Picture 1。core 的图像节点没有尺寸参数（vision 固定 1024
+        # 短边、VAE 参考 1024–2048），这里把 grounding_px 映射成 vision 短边：
+        # 0 = 官方 1024。p-h3-image 沿用 core 的面积规则与 edit 前缀。
+        height, width = tile_pixels.shape[1], tile_pixels.shape[2]
+        ph3 = "ph3" in type(getattr(clip, "tokenizer", None)).__name__.lower()
+        if ph3:
+            vw, vh = _minimax_area_size(width, height, _MINIMAX_PH3_VISION_PIXELS)
+            rw, rh = _minimax_area_size(width, height, width * height)
+        else:
+            vision = int(grounding_px or 0)
+            short = vision if vision > 0 else _MINIMAX_IMAGE_SHORT_EDGE
+            vw, vh = _minimax_ref_size(width, height, short, short)
+            rw, rh = _minimax_ref_size(width, height, _MINIMAX_IMAGE_SHORT_EDGE, _MINIMAX_IMAGE_VAE_SHORT_EDGE)
+        images = [_minimax_rgb(tile_pixels, vw, vh)]
+        ref_latent = vae.encode(_minimax_rgb(tile_pixels, rw, rh))
+        extra = {"minimax_refs": [{"kind": "image", "latent_h": ref_latent.shape[-2],
+                                   "latent_w": ref_latent.shape[-1], "latent": ref_latent}]}
+        text = prompt
+        if ph3:
+            raw = (prompt or "").strip()
+            text = raw if _MINIMAX_EDIT_VERBATIM.match(raw) else "Edit <Picture 1>. " + (prompt or "")
+        positive = clip.encode_from_tokens_scheduled(
+            clip.tokenize(text, images=images, picture_label="Picture %d: "))
+    elif krea2:
         # Krea 2 的训练配方是 Qwen3-VL + _GROUNDING_TEMPLATE（Describe the image...）
         # 且 vision 按最长边截断；不能套 2509 的 "Picture 1:" + 384² 面积桶。
         ref_latents = [vae.encode(tile_pixels[:1])]
@@ -656,14 +754,18 @@ def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_p
         images = [rgb]
         positive = clip.encode_from_tokens_scheduled(
             clip.tokenize("Picture 1: " + prompt, images=images, prevent_empty_text=True))
-    extra = {"reference_latents": ref_latents}
-    if reference_method is not None:
-        extra["reference_latents_method"] = reference_method
+    if not minimax:
+        extra = {"reference_latents": ref_latents}
+        if reference_method is not None:
+            extra["reference_latents_method"] = reference_method
     positive = node_helpers.conditioning_set_values(positive, extra, append=True)
     negative = None
     if encode_negative:
         if krea2:
             negative = _grounded_conditioning(clip, negative_prompt, tile_pixels, grounding_px)
+        elif minimax:
+            negative = clip.encode_from_tokens_scheduled(
+                clip.tokenize(negative_prompt or "", images=images, picture_label="Picture %d: "))
         else:
             negative = clip.encode_from_tokens_scheduled(
                 clip.tokenize(negative_prompt or "", images=images, prevent_empty_text=True))
@@ -672,6 +774,8 @@ def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_p
     def _to_cpu_deep(v):
         if torch.is_tensor(v):
             return v.to("cpu")
+        if isinstance(v, dict):
+            return {k: _to_cpu_deep(t) for k, t in v.items()}
         if isinstance(v, list):
             return [_to_cpu_deep(t) for t in v]
         return v

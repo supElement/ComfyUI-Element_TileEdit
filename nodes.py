@@ -25,6 +25,7 @@ from .common import (
     _tokenizer_handles_images,
     _is_flux2_family,
     _is_moss_image,
+    _is_minimax_image,
     _is_krea2,
     _in_context_model,
     _scheduled_ref_model,
@@ -68,7 +69,7 @@ class TiledUpscale:
     OUTPUT_IS_LIST = (False, True, True, False)
     FUNCTION = "refine"
     DESCRIPTION = ("All-in-one tiled refine/upscale for reference-latent edit models (Qwen Image "
-                   "2.1 / Edit 2509 / 2511, FLUX.2 klein, Krea 2 and similar). Upscales, splits "
+                   "2.1 / Edit 2509 / 2511, FLUX.2 klein, Krea 2, MiniMax-H3-Image and similar). Upscales, splits "
                    "into overlapping tiles, regenerates each tile at full tile resolution and "
                    "blends everything into one image. Works with any model/conditioning/vae "
                    "combination that is valid on its own: models without reference-latent support "
@@ -120,7 +121,9 @@ class TiledUpscale:
                 "grounding_px": ("INT", {"default": 768, "min": 0, "max": 4096, "step": 32,
                     "tooltip": "Vision-slot size for the per-tile text encode. Qwen Edit 2509/2511: area "
                                "bucket, 0 or >=384 = official 384x384 resize. Qwen Image 2.1: ignored. "
-                               "Krea 2: caps the vision input's longest side, 0 = tile size."}),
+                               "Krea 2: caps the vision input's longest side, 0 = tile size. "
+                               "MiniMax-H3-Image: vision short edge, 0 = official 1024 (the VAE "
+                               "reference stays at core's 1024-2048 short edge)."}),
                 "reference_strength": ("STRING", {"default": "1.0,1.0,0.95,0.9,0.8", "multiline": False, "tooltip":
                     "A list of reference strengths for each step, corresponding strictly to the number of steps."
                     "Supports delimiters such as commas (Chinese or English), enumeration commas (、), and colons. A single value applies to all steps; "
@@ -206,6 +209,7 @@ class TiledUpscale:
         alignment = _pixel_alignment(model)
         strength_values = _parse_strength_schedule(reference_strength)
         krea2 = _is_krea2(model.get_model_object("diffusion_model"))
+        minimax = _is_minimax_image(model)
 
         if reference_mode and not krea2:
             logging.warning("[TiledUpscale] reference_mode (Krea 2 identity-edit) only applies "
@@ -239,6 +243,11 @@ class TiledUpscale:
                     logging.info("[TiledUpscale] MOSS-Image detected; tiles ride as native "
                                  "reference latents (method index_timestep_zero_text_start). "
                                  "Per-step reference_strength works: ref_kv is stripped per step.")
+                elif minimax:
+                    grounded_conditioning = True
+                    mode = "conditioning (MiniMax-H3-Image)"
+                    logging.info("[TiledUpscale] MiniMax-H3-Image detected; each tile rides as "
+                                 "Picture 1 (minimax_refs + vision) and is re-injected every step.")
                 elif _tokenizer_handles_images(clip) and not _is_flux2_family(model):
                     grounded_conditioning = True
                     mode = "conditioning (grounded)"
@@ -313,7 +322,7 @@ class TiledUpscale:
                     pos_c, neg_c = _grounded_reference_conditioning(
                         clip, prompt, vae, crop, grounding_px, reference_method,
                         encode_negative=(cfg > 1.0), qwen21=qwen21,
-                        negative_prompt=negative_prompt, krea2=krea2)
+                        negative_prompt=negative_prompt, krea2=krea2, minimax=minimax)
                     tile_positive.append(pos_c)
                     if cfg > 1.0:
                         tile_negative.append(neg_c)

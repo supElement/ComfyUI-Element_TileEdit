@@ -5,6 +5,7 @@ per-tile LATENT + CONDITIONING，供原生 KSampler 逐 tile 去噪。
 三条条件分支与原 TiledUpscale.refine 一致：
 - Qwen Edit 类 tokenizer（图像槽）→ grounded conditioning
 - Krea 2 identity-edit → in-context reference_latents
+- MiniMax-H3-Image → minimax_refs 参考通道 + 1024 短边 vision（Picture 1）
 - 其它模型 → 通用 reference_latents（静态参考；逐步削弱交给 ElementStrengthSchedule）
 """
 
@@ -19,6 +20,7 @@ from .common import (
     _tokenizer_handles_images,
     _is_flux2_family,
     _is_moss_image,
+    _is_minimax_image,
     _is_krea2,
     _has_krea2_in_context_patch,
     _strip_owned_patches,
@@ -77,7 +79,8 @@ class ElementTileEncode:
                 "grounding_px": ("INT", {"default": 768, "min": 0, "max": 4096, "step": 32,
                                          "tooltip": "Vision-slot size for the per-tile text encode. "
                                                     "Qwen Edit 2509/2511: area bucket, 0 or >=384 = official 384x384 resize. "
-                                                    "Qwen Image 2.1: ignored. Krea 2: caps the vision input's longest side."}),
+                                                    "Qwen Image 2.1: ignored. Krea 2: caps the vision input's longest side. "
+                                                    "MiniMax-H3-Image: vision short edge, 0 = official 1024 (the VAE reference stays at core's 1024-2048 short edge)."}),
             },
         }
 
@@ -118,6 +121,7 @@ class ElementTileEncode:
         alignment = _pixel_alignment(model)
 
         krea2 = _is_krea2(model.get_model_object("diffusion_model"))
+        minimax = _is_minimax_image(model)
         has_in_context_patch = krea2 and _has_krea2_in_context_patch(model)
         in_context = krea2 and (reference_mode or has_in_context_patch)
         if reference_mode and not krea2:
@@ -136,6 +140,11 @@ class ElementTileEncode:
                 logging.info("[TileEncode] MOSS-Image detected; references ride as native "
                              "reference latents (index_timestep_zero_text_start). "
                              "Per-step reference_strength works on both ref_kv and ref_latents.")
+            elif minimax:
+                grounded = True
+                mode = "conditioning (MiniMax-H3-Image)"
+                logging.info("[TileEncode] MiniMax-H3-Image detected; each tile rides as "
+                             "Picture 1 (minimax_refs + vision) and is re-injected every step.")
             elif any(p.strip() for p in prompts) and _tokenizer_handles_images(clip) \
                     and not _is_flux2_family(model):
                 grounded = True
@@ -192,7 +201,7 @@ class ElementTileEncode:
                 pos, neg = _grounded_reference_conditioning(
                     clip, p, vae, crop, grounding_px,
                     reference_method=reference_method, encode_negative=True,
-                    qwen21=qwen21, negative_prompt=ng, krea2=krea2)
+                    qwen21=qwen21, negative_prompt=ng, krea2=krea2, minimax=minimax)
             elif in_context:
                 ref_latent = vae.encode(crop)
                 extra = {"reference_latents": [ref_latent],
