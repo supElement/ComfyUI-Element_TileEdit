@@ -82,7 +82,7 @@
 | **Qwen-Image Edit 2509** | **1.0** | 384×384 vision bucket + reference latent 双通道 | ★★★★ | 与 2511 同源，参考通道成熟，可拉满，缺少细节 |
 | **FLUX.2 klein base** | **0.7 – 1.0** | 仅 reference-latent 通道（text encoder 为纯文本，无 vision grounding） | ★★★★ | 缺少 vision 通道, 面部有些油, 偏色, 可使用[Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 做色彩或变形校正，搭配防偏移类lora使用时可提升至★★★★☆ |
 | **Krea2 + krea2_identity_edit** | **0.7 – 0.8** | 手动重建 `[text｜source(frame=1)｜target(frame=0)]` in-context 前向 | ★★★☆ | 高降噪下色彩一致性最好，但有时会出现脏点，0.7–0.8 是清晰度与稳定的最佳平衡点 |
-| **MiniMax-H3-Image** | **0.8 - 1.0** | conditioning 的 `minimax_refs` 参考通道（每步原样重注入）+ `Picture 1:` vision | ★★★☆ | 参考作为独立序列段注入，vision 短边 1024、VAE 参考短边 1024–2048。推荐分块分辨率 4–6MP，分辨率低时锁不住构图，结构会漂移。大 tile 下小数参考强度会双前向、开销翻倍，建议先用全 1.0。 |
+| **MiniMax-H3-Image** | **0.8 - 1.0** | conditioning 的 `minimax_refs` 参考通道（每步原样重注入）+ `Picture 1:` vision | ★★★☆ | 参考作为独立序列段注入，vision 短边 1024、VAE 参考短边 1024–2048。推荐分块分辨率 4MP 左右，分辨率低时锁不住构图，结构会漂移。|
 | **FLUX.3 klein turbo** | **0.7 – 0.8** | text encoder 仅文本有效，无 vision grounding | ★★★ | 缺少细节、易变形（也可能是comfyUI实现的问题），优点是不容易脏 |
 | **FLUX.2 klein turbo** | **0.7 – 0.8** | 仅 reference-latent 通道（text encoder 为纯文本，无 vision grounding） | ★★★ | 缺少 vision 通道，参考信号弱一档，很容易脏、偏色, 可使用[Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 做色彩或变形校正，搭配防偏移类lora使用时可提升至★★★☆ |
 | **MOSS-Image + Moss-Image-Edit** | **0.7 – 1** | 原生 `reference_latents` 通道，采用 `index_timestep_zero_text_start` 布局；ComfyUI 自动预计算 `ref_kv` 加速 | ★★☆ | 新版comfyUI 原生支持 Edit LoRA。借助 1:1 尺寸参考注入。视觉语义补全、全局语境理解以及先验知识方面较弱，结果细节不足，偏模糊。因涉及首步 K/V 预计算，第一步耗时略长。推荐搭配 ComfyUI 最新版本（#17296）。 |
@@ -174,7 +174,7 @@
 - 减小 tile_size（分块更多、单块更小）。Edit 2509/2511 可额外降低 grounding_px；Qwen 2.1 的 grounding_px 不参与计算，只能减小 tile_size。
 
 **MiniMax-H3-Image 放大后位置漂移？**  
-- MiniMax-H3-Image 不适合处理分块分辨率低的图像。处理：把每块生成分辨率提到 4-6 MP。
+- MiniMax-H3-Image 不适合处理分块分辨率低的图像。处理：把每块生成分辨率提到 4MP 左右。
 
 **SDXL 等普通模型能用吗？**  
 - 能。节点会自动退化为普通分块 img2img，参考 latent 被模型忽略，用 denoise 控制细节强度（0.2 – 0.5 起试）。
