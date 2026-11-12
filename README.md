@@ -9,7 +9,7 @@
   <sub> 原名：ComfyUI-Element_TileUpscale </sub>
 
 专为图像编辑模型设计的分块精修 / 编辑 / 放大 ComfyUI 扩展（仅限单图），提供强大的分块控制与局部精修能力。
-支持模型：Qwen-Image 2.1 / Edit 2509 / 2511、FLUX.3 / FLUX.2 klein、Krea2 + identity_edit lora、Moss + Moss-Image-Edit lora、MiniMax-H3-Image。
+支持模型：Qwen-Image 2.1 / Edit 2509 / 2511、FLUX.3 / FLUX.2 klein、Krea2 + identity_edit lora、Moss + Moss-Image-Edit lora、MiniMax-H3-Image、MiniMax-H3-Video（仅拆分节点工作流）。
 
 ✨ 分块放大：告别传统 img2img 的跨块撕裂。
 用分块参考保证跨块一致性。你可以放心将 Denoise 重绘强度拉高至 0.7–1.0，同时完美保持原图的人物身份、结构与纹理细节。支持自定义每采样步的参考强度，精准平衡“修复强度”与“一致性”，这是传统 img2img 分块放大无法做到的。
@@ -65,7 +65,7 @@
 
 #### 3. 不保证对未适配模型的正确性
 
-> 本扩展适配的家族为：Krea 2（identity-edit）、MiniMax-H3-Image、p-h3-image、Qwen Image 2.1、Qwen Edit 2509/2511、FLUX.2 Klein、FLUX.3 Klein、MOSS-Image，以及支持 reference_latents 的通用模型。其它模型（Qwen-Image-2512、SDXL系列、普通 Flux t2i 等）会退化为普通 tiled img2img。
+> 本扩展适配的家族为：Krea 2（identity-edit）、MiniMax-H3-Image、MiniMax-H3-Video（拆分节点）、p-h3-image、Qwen Image 2.1、Qwen Edit 2509/2511、FLUX.2 Klein、FLUX.3 Klein、MOSS-Image，以及支持 reference_latents 的通用模型。其它模型（Qwen-Image-2512、SDXL系列、普通 Flux t2i 等）会退化为普通 tiled img2img。
 > 已适配模型只需在 **Element Strength Schedule** 里选一次 `model_type`（auto = 自动识别），Encode 会随 MODEL 读取同一选择；不接 Schedule 时 Encode 自动识别。Krea2 的 identity-edit 需打开 reference_mode，其 in-context 前向需要随上游内部布局同步适配的部分。
 
 ---
@@ -80,6 +80,7 @@
 | **FLUX.2 klein base** | **0.7 – 1.0** | 仅 reference-latent 通道（text encoder 为纯文本，无 vision grounding） | ★★★★ | 缺少 vision 通道, 面部有些油, 偏色, 可使用[Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 做色彩或变形校正，搭配防偏移类lora使用时可提升至★★★★☆ |
 | **Krea2 + krea2_identity_edit** | **0.7 – 0.8** | 手动重建 `[text｜source(frame=1)｜target(frame=0)]` in-context 前向 | ★★★☆ | 高降噪下色彩一致性最好，但有时会出现脏点，0.7–0.8 是清晰度与稳定的最佳平衡点 |
 | **MiniMax-H3-Image** | **0.8 - 1.0** | conditioning 的 `minimax_refs` 参考通道（每步原样重注入）+ `Picture 1:` vision | ★★★☆ | 参考作为独立序列段注入，vision 短边 1024、VAE 参考短边 1024–2048。推荐分块分辨率 4MP 左右，分辨率低时锁不住构图，结构会漂移。|
+| **MiniMax-H3-Video** | **0.8 - 1.0** | 同 H3-Image 的 `minimax_refs` + `<Picture 1>:` vision；采样 latent 为 `(video, 全零 audio)` 两条流，解码只取视频流 | ★★★☆ | 仅拆分节点工作流。把 H3-Image 工作流里的模型换成 H3 视频模型即可；参考尺寸按 p-h3 图像规则（vision 1MP 面积、VAE 参考与块同面积）。采样进度条里的音频流会被生成但丢弃。 |
 | **FLUX.3 klein turbo** | **0.7 – 0.8** | text encoder 仅文本有效，无 vision grounding | ★★★ | 缺少细节、易变形（也可能是comfyUI实现的问题），优点是不容易脏 |
 | **FLUX.2 klein turbo** | **0.7 – 0.8** | 仅 reference-latent 通道（text encoder 为纯文本，无 vision grounding） | ★★★ | 缺少 vision 通道，参考信号弱一档，很容易脏、偏色, 可使用[Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 做色彩或变形校正，搭配防偏移类lora使用时可提升至★★★☆ |
 | **MOSS-Image + Moss-Image-Edit** | **0.7 – 1** | 原生 `reference_latents` 通道，采用 `index_timestep_zero_text_start` 布局；ComfyUI 自动预计算 `ref_kv` 加速 | ★★☆ | 新版comfyUI 原生支持 Edit LoRA。借助 1:1 尺寸参考注入。视觉语义补全、全局语境理解以及先验知识方面较弱，结果细节不足，偏模糊。因涉及首步 K/V 预计算，第一步耗时略长。推荐搭配 ComfyUI 最新版本（#17296）。 |
@@ -139,7 +140,8 @@
 | 节点 | 作用 |
 |---|---|
 | **Element Tiled Upscale** | 一体化节点：放大 → 切块 → 逐块参考重绘 → 频率分离融合，一键出图 |
-| **Element Tile Split** | 纯几何分块 + 图像源接入，无模型依赖。后端执行时会全量重算几何，前端 UI 只做预览。|
+| **Element Tile Split** | 纯几何分块 + 图像源接入，无模型依赖。后端执行时会全量重算几何，前端 UI 只做预览。输出单个 `tile_info` 端口。|
+| **Element Tile Info** | 把 Split 的 `tile_info` 展开成 `split_images / tile_masks / prompt / negative_prompt / grid / original_image` 六个端口，无参数 |
 | **Element Tile Encode** | 把每块图像 / 提示词编码成 per-tile 的 LATENT + CONDITIONING，采样交给 ComfyUI 原生 KSampler |
 | **Element Tile Merge** | 把逐块解码后的 IMAGE 列表用同一套低频/高频分离 + 羽化权重拼回整图，可选逐块色彩匹配 |
 | **Element Krea2 In-Context Patch** | 模型补丁：让 Krea2 以 identity-edit 的 in-context 布局消费挂在 conditioning 上的参考 latent |

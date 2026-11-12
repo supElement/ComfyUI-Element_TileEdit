@@ -9,7 +9,7 @@
   <sub> Original Name: ComfyUI-Element_TileUpscale </sub>
 
 A ComfyUI extension designed for image editing models, providing powerful tile control and local refinement capabilities for upscaling / editing / tiling (single image only).
-Supported models: Qwen-Image 2.1 / Edit 2509 / 2511, FLUX.3 / FLUX.2 klein, Krea2 + identity_edit lora, Moss + Moss-Image-Edit lora, MiniMax-H3-Image.
+Supported models: Qwen-Image 2.1 / Edit 2509 / 2511, FLUX.3 / FLUX.2 klein, Krea2 + identity_edit lora, Moss + Moss-Image-Edit lora, MiniMax-H3-Image, MiniMax-H3-Video (split-node workflow only).
 
 ✨ Tile-based Upscaling: Say goodbye to cross-tile tearing in traditional img2img.
 Use tile references to ensure cross-tile consistency. You can confidently push Denoise redraw strength up to 0.7–1.0 while perfectly maintaining the identity, structure, and texture details of the original image. Supports custom reference strength per sampling step to precisely balance "repair strength" and "consistency," something traditional img2img tiling upscaling cannot achieve.
@@ -65,7 +65,7 @@ Neighbor context (only for integrated nodes): Already generated adjacent tiles w
 
 #### 3. Does not guarantee correctness for unadapted models
 
-> The adapted families are: Krea 2 (identity-edit), MiniMax-H3-Image, p-h3-image, Qwen Image 2.1, Qwen Edit 2509/2511, FLUX.2 Klein, FLUX.3 Klein, MOSS-Image, and general models supporting reference_latents. Other models (Qwen-Image-2512, SDXL series, ordinary Flux t2i, etc.) will degrade into normal tiled img2img.
+> The adapted families are: Krea 2 (identity-edit), MiniMax-H3-Image, MiniMax-H3-Video (split nodes), p-h3-image, Qwen Image 2.1, Qwen Edit 2509/2511, FLUX.2 Klein, FLUX.3 Klein, MOSS-Image, and general models supporting reference_latents. Other models (Qwen-Image-2512, SDXL series, ordinary Flux t2i, etc.) will degrade into normal tiled img2img.
 > Adaptable models only need to select `model_type` once in **Element Strength Schedule** (auto = auto-identify), Encode will read the same selection as MODEL; if not connected to Schedule, Encode auto-identifies. Krea2's identity-edit requires turning on reference_mode, and its in-context forward needs to adapt parts that synchronize with the upstream internal layout.
 ## Recommended Denoising Values and Combinations
 
@@ -77,6 +77,7 @@ Neighbor context (only for integrated nodes): Already generated adjacent tiles w
 | **FLUX.2 klein base** | **0.7 – 1.0** | Only reference-latent channel (text encoder is pure text, no vision grounding) | ★★★★ | Lacks vision channel, some facial artifacts, color bias, can use [Smart merge images node](https://github.com/supElement/ComfyUI_Element_easy) for color or deformation correction, can be improved to ★★★★★☆ when combined with anti-shift LoRA |
 | **Krea2 + krea2_identity_edit** | **0.7 – 0.8** | Manually reconstruct `[text｜source(frame=1)｜target(frame=0)]` in-context forward | ★★★☆ | Best color consistency under high denoising, but sometimes dirty spots appear, 0.7–0.8 is the best balance between clarity and stability |
 | **MiniMax-H3-Image** | **0.8 - 1.0** | conditioning's `minimax_refs` reference channel (re-injected verbatim per step) + `Picture 1:` vision | ★★★☆ | Reference injected as an independent sequence segment, vision short side 1024, VAE reference short side 1024–2048. Recommend block resolution around 4MP, low resolution can't lock composition, structure will drift. |
+| **MiniMax-H3-Video** | **0.8 - 1.0** | Same `minimax_refs` + `<Picture 1>:` vision as H3-Image; sampling latent is two streams `(video, all-zero audio)`, decoding keeps only the video stream | ★★★☆ | Split-node workflow only. Just swap the H3-Image workflow's model for the H3 video model; reference sizes follow the p-h3 image rule (1MP vision area, VAE reference area equal to the tile). The audio stream is generated and discarded. |
 | **FLUX.3 klein turbo** | **0.7 – 0.8** | text encoder only text effective, no vision grounding | ★★★ | Lacks details, prone to deformation (may be due to comfyUI implementation issues), advantage is not easy to get dirty |
 | **FLUX.2 klein turbo** | **0.7 – 0.8** | Only reference-latent channel (text encoder is pure text, no vision grounding) | ★★★ | Lacks vision channel, reference signal one level weaker, very easy to get dirty, color bias, can use [Smart merge images node](https://github.com/supElement/ComfyUI_Element_easy) for color or deformation correction, can be improved to ★★★☆ when combined with anti-shift LoRA |
 | **MOSS-Image + Moss-Image-Edit** | **0.7 – 1** | Native `reference_latents` channel, uses `index_timestep_zero_text_start` layout; ComfyUI automatic pre-computation `ref_kv` acceleration | ★★☆ | New comfyUI natively supports Edit LoRA. Leverages 1:1 size reference injection. Weak in visual semantic completion, global context understanding, and prior knowledge, resulting in insufficient details and blurriness. Due to first-step K/V pre-computation, the first step is slightly longer. Recommend pairing with the latest ComfyUI version (#17296). |
@@ -135,7 +136,8 @@ Dependencies are the ComfyUI itself, no additional installations required.
 | Node | Function |
 |---|---|
 | **Element Tiled Upscale** | Integrated node: Upscale → Split → Per-tile reference redraw → Frequency separation fusion, one-click output |
-| **Element Tile Split** | Pure geometric splitting + Image source input, no model dependency. The backend will fully recalculate geometry during execution, while the frontend UI only does preview. |
+| **Element Tile Split** | Pure geometric splitting + Image source input, no model dependency. The backend will fully recalculate geometry during execution, while the frontend UI only does preview. Outputs a single `tile_info` port. |
+| **Element Tile Info** | Expands Split's `tile_info` into six ports: `split_images / tile_masks / prompt / negative_prompt / grid / original_image`. No parameters |
 | **Element Tile Encode** | Encodes each tile image / prompt into per-tile LATENT + CONDITIONING, sampling is handed over to ComfyUI's native KSampler |
 | **Element Tile Merge** | Merges the list of images after per-tile decoding using the same low-frequency/high-frequency separation + feathering weight, with optional per-tile color matching |
 | **Element Krea2 In-Context Patch** | Model patch: Allows Krea2 to consume reference latent attached to conditioning via identity-edit's in-context layout |

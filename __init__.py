@@ -28,6 +28,12 @@ except Exception:
     logging.warning("[Element TileEdit] ElementTileSplit failed to load:\n%s", traceback.format_exc())
 
 try:
+    from .nodes_split import ElementTileInfo
+    _register("ElementTileInfo", ElementTileInfo, "Element Tile Info")
+except Exception:
+    logging.warning("[Element TileEdit] ElementTileInfo failed to load:\n%s", traceback.format_exc())
+
+try:
     from .nodes_encode import ElementTileEncode
     _register("ElementTileEncode", ElementTileEncode, "Element Tile Encode")
 except Exception:

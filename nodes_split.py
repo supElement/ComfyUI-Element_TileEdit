@@ -6,7 +6,7 @@
 - 未覆盖区域智能补块（fill_gaps，贪心最大矩形）
 - 每层 upscale（生成分辨率）+ c×r 二次分割 + 层内 overlap
 - 提示词合成：layer + ", " + global（层为空则仅 global）
-- 输出：tile_images（源 crop 重采样到生成尺寸）、per-tile prompt 列表、grid（给 Merge/Encode）
+- 输出：单个 tile_info（含 tile_images / original_image / prompt / negative_prompt / tile_masks / grid），由 ElementTileInfo 拆回
 
 坐标系约定：
 - 框/层坐标 = 源图像素空间（前端画布所见即所得，吸附 div）
@@ -30,6 +30,7 @@ import comfy.utils
 import folder_paths
 
 GRID_TYPE = "ELEMENT_TILE_GRID"
+TILEINFO_TYPE = "ELEMENT_TILE_INFO"
 
 PREVIEW_MAX_EDGE = 2048   # 执行后节点内预览长边上限（仅预览，不影响输出）
 MAX_TILES = 256
@@ -824,9 +825,9 @@ class ElementTileSplit:
     CATEGORY = "Element TileEdit"
     FUNCTION = "split"
     OUTPUT_NODE = True
-    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING", "STRING", GRID_TYPE, "MASK")
-    RETURN_NAMES = ("split_images", "original_image", "prompt", "negative_prompt", "grid", "tile_masks")
-    OUTPUT_IS_LIST = (True, False, True, True, False, True)
+    RETURN_TYPES = (TILEINFO_TYPE,)
+    RETURN_NAMES = ("tile_info",)
+    OUTPUT_IS_LIST = (False,)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1250,5 +1251,36 @@ class ElementTileSplit:
         logging.info("[TileSplit] mode=%s | %d tile(s) | canvas %dx%d -> output %dx%d "
                      "(div=%d, unified=%.2fx)",
                      mode, len(tiles), out_w, out_h, exact_w, exact_h, div, u_up)
-        return {"ui": ui, "result": (tile_images, source, prompts, negatives, grid, tile_masks)}
+        tile_info = {
+            "split_images": tile_images,
+            "original_image": source,
+            "prompt": prompts,
+            "negative_prompt": negatives,
+            "tile_masks": tile_masks,
+            "grid": grid,
+        }
+        return {"ui": ui, "result": (tile_info,)}
+
+
+class ElementTileInfo:
+    """把 ElementTileSplit 的单个 tile_info 端口拆回原有的六个输出。"""
+
+    CATEGORY = "Element TileEdit"
+    FUNCTION = "expand"
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "STRING", GRID_TYPE, "IMAGE")
+    RETURN_NAMES = ("split_images", "tile_masks", "prompt", "negative_prompt", "grid", "original_image")
+    OUTPUT_IS_LIST = (True, True, True, True, False, False)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "tile_info": (TILEINFO_TYPE,),
+            },
+        }
+
+    def expand(self, tile_info):
+        return (tile_info["split_images"], tile_info["tile_masks"],
+                tile_info["prompt"], tile_info["negative_prompt"],
+                tile_info["grid"], tile_info["original_image"])
 

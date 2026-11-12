@@ -21,6 +21,8 @@ from .common import (
     _is_flux2_family,
     _is_moss_image,
     _is_minimax_image,
+    _is_minimax_video,
+    _minimax_av_latent,
     _is_krea2,
     _has_krea2_in_context_patch,
     _model_family,
@@ -66,12 +68,12 @@ class ElementTileEncode:
                 "vae": ("VAE",),
                 "clip": ("CLIP",),
                 "tile_images": ("IMAGE",),
-                "tile_prompts": ("STRING", {"forceInput": True}),
-                "tile_negatives": ("STRING", {"forceInput": True}),
-                "tile_masks": ("MASK", {"tooltip": "Required: ElementTileSplit's 6th output (tile_masks). "
+                "tile_masks": ("MASK", {"tooltip": "Required: Element Tile Info's tile_masks output. "
                                                    "White = repaint, black = keep as reference. "
                                                    "When Split's edge mask is off this is an all-white list, so wiring it is always safe; "
                                                    "leaving it unconnected while the edge mask is on silently disables the sampler lock."}),
+                "tile_prompts": ("STRING", {"forceInput": True}),
+                "tile_negatives": ("STRING", {"forceInput": True}),
             },
             "optional": {
                 "reference_mode": ("BOOLEAN", {"default": False,
@@ -81,12 +83,13 @@ class ElementTileEncode:
                                          "tooltip": "Vision-slot size for the per-tile text encode. "
                                                     "Qwen Edit 2509/2511: area bucket, 0 or >=384 = official 384x384 resize. "
                                                     "Qwen Image 2.1: ignored. Krea 2: caps the vision input's longest side. "
-                                                    "MiniMax-H3-Image: vision short edge, 0 = official 1024 (the VAE reference stays at core's 1024-2048 short edge)."}),
+                                                    "MiniMax-H3-Image: vision short edge, 0 = official 1024 (the VAE reference stays at core's 1024-2048 short edge). "
+                                                    "MiniMax-H3-Video: vision short edge, 0 = p-h3 image rule's 1MP area (the VAE reference matches the tile area)."}),
             },
         }
 
-    def encode(self, model, vae, clip, tile_images, tile_prompts, tile_negatives,
-               reference_mode=False, grounding_px=768, tile_masks=None):
+    def encode(self, model, vae, clip, tile_images, tile_masks, tile_prompts, tile_negatives,
+               reference_mode=False, grounding_px=768):
         model = _unwrap(model)
         vae = _unwrap(vae)
         clip = _unwrap(clip)
@@ -124,9 +127,10 @@ class ElementTileEncode:
 
         auto = family == "auto"
         diffusion_model = model.get_model_object("diffusion_model")
+        minimax_video = _is_minimax_video(model)
         if auto:
             krea2 = _is_krea2(diffusion_model)
-            minimax = _is_minimax_image(model)
+            minimax = _is_minimax_image(model) or minimax_video
             moss = _is_moss_image(model)
             flux_latent = _is_flux2_family(model)
         else:
@@ -161,9 +165,12 @@ class ElementTileEncode:
                              "Per-step reference_strength works on both ref_kv and ref_latents.")
             elif minimax:
                 grounded = True
-                mode = "conditioning (MiniMax-H3-Image)"
-                logging.info("[TileEncode] MiniMax-H3-Image detected; each tile rides as "
-                             "Picture 1 (minimax_refs + vision) and is re-injected every step.")
+                mode = ("conditioning (MiniMax-H3-Video AV)" if minimax_video
+                        else "conditioning (MiniMax-H3-Image)")
+                logging.info("[TileEncode] %s detected; each tile rides as "
+                             "Picture 1 (minimax_refs + vision) and is re-injected every step."
+                             "%s", "MiniMax-H3-Video" if minimax_video else "MiniMax-H3-Image",
+                             " Latent is packed as (video, zero audio)." if minimax_video else "")
             elif family in ("krea2", "qwen21", "qwen_edit") or (
                     auto and any(p.strip() for p in prompts)
                     and _tokenizer_handles_images(clip) and not flux_latent):
@@ -206,8 +213,15 @@ class ElementTileEncode:
                 latent = vae.encode(crop[:, :, :, :3])
             latent = latent.to(device=comfy.model_management.intermediate_device(),
                                dtype=comfy.model_management.intermediate_dtype())
-            latent = comfy.sample.fix_empty_latent_channels(model, latent)
-            latent_out = {"samples": latent}
+            if minimax_video:
+                # H3 视频模型按 (video, audio) 两条流采样；音频流只为满足 AV
+                # 打包，结果不会被解码（VAEDecode 取第一条流）。
+                samples = latent
+                if not getattr(latent, "is_nested", False):
+                    samples = _minimax_av_latent(latent)
+            else:
+                samples = comfy.sample.fix_empty_latent_channels(model, latent)
+            latent_out = {"samples": samples}
             if idx < len(masks) and masks[idx] is not None:
                 m = masks[idx]
                 if m.ndim == 4:
@@ -226,7 +240,8 @@ class ElementTileEncode:
                 pos, neg = _grounded_reference_conditioning(
                     clip, p, vae, crop, grounding_px,
                     reference_method=reference_method, encode_negative=True,
-                    qwen21=qwen21, negative_prompt=ng, krea2=krea2, minimax=minimax)
+                    qwen21=qwen21, negative_prompt=ng, krea2=krea2, minimax=minimax,
+                    minimax_video=minimax_video)
             elif in_context:
                 ref_latent = vae.encode(crop)
                 extra = {"reference_latents": [ref_latent],

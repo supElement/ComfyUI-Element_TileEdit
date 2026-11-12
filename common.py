@@ -147,6 +147,29 @@ def _is_minimax_image(model):
         return False
     return hasattr(dm, "pdd_sigmas") or "minimaxh3imagemodel" in type(dm).__name__.lower()
 
+
+def _is_minimax_video(model):
+    """MiniMax H3 视频模型（带音频流的 AV DiT）。参考同样走 minimax_refs，
+    区别只在采样 latent：必须是 (video, audio) 的 NestedTensor。"""
+    try:
+        dm = model.get_model_object("diffusion_model")
+    except Exception:
+        return False
+    return hasattr(dm, "audio_patch_proj")
+
+
+def _minimax_av_latent(latent):
+    """视频 latent -> H3 视频模型要求的 (video, 全零 audio) NestedTensor。
+    audio 长度按 core 的 5/3 帧率规则跟视频帧数对齐（单帧图 = 2）。"""
+    import comfy.nested_tensor
+    from comfy.ldm.minimax.model import FRAME_PER_TOKEN, FRAME_RESCALE
+    if latent.ndim == 4:
+        latent = latent.unsqueeze(2)
+    frames = sum(FRAME_PER_TOKEN[k % 5] for k in range(latent.shape[2]))
+    audio_t = max(1, round(frames * FRAME_RESCALE))
+    audio = latent.new_zeros((latent.shape[0], 32, 2, audio_t))
+    return comfy.nested_tensor.NestedTensor((latent, audio))
+
 # ---------------------------------------------------------------------------
 # reference_strength 每步调度
 # 语义：强度列表与 steps 一一对应。第 i 次模型前向（第 i 个采样步，0 起）取
@@ -242,22 +265,19 @@ def _describe_ref_channels(channels):
 # 模型家族规格：单一真相
 # ElementStrengthSchedule 用它生成下拉、取参考通道，并把家族 key 写进返回的
 # MODEL；ElementTileEncode 读同一个 key 决定 conditioning 分支。两侧不再各维护
-# 一份枚举（旧实现两份枚举文案不同，选成不同族时静默走错分支）。
 # channels 两种写法见 _find_ref_slot：名字 = kwargs 通道；("args", i) = 位置槽。
 # ---------------------------------------------------------------------------
 _ELEMENT_FAMILIES = {
-    "krea2":     {"label": "Krea 2 — ref_latents",                      "channels": (("args", 1),)},
-    "qwen21":    {"label": "Qwen Image 2.1 — ref_latents",              "channels": (("args", 0),)},
-    "qwen_edit": {"label": "Qwen Edit 2509/2511 — ref_latents",         "channels": (("args", 1),)},
-    "minimax":   {"label": "MiniMax-H3-Image — minimax_payload.refs",   "channels": ("minimax_payload",)},
-    "moss":      {"label": "MOSS-Image — ref_kv / ref_latents",         "channels": ("ref_kv", "ref_latents")},
-    "flux2":     {"label": "FLUX.2 Klein — ref_latents",                "channels": (("args", 2),)},
-    "flux3":     {"label": "FLUX.3 Klein — ref_states",                 "channels": ("ref_states", "ref_latents")},
-    "generic":   {"label": "generic — ref_latents / reference_latents", "channels": ("ref_latents", "reference_latents", "positional")},
+    "krea2":     {"label": "Krea2 - ref_latents",                       "channels": (("args", 1),)},
+    "qwen21":    {"label": "Qwen Image 2.1 - ref_latents",              "channels": (("args", 0),)},
+    "qwen_edit": {"label": "Qwen Edit 2509/2511 - ref_latents",         "channels": (("args", 1),)},
+    "minimax":   {"label": "MiniMax-H3 - minimax_payload.refs",         "channels": ("minimax_payload",)},
+    "moss":      {"label": "MOSS-Image - ref_kv/ref_latents",           "channels": ("ref_kv", "ref_latents")},
+    "flux2":     {"label": "FLUX.2 Klein - ref_latents",                "channels": (("args", 2),)},
+    "flux3":     {"label": "FLUX.3 Klein - ref_states",                 "channels": ("ref_states", "ref_latents")},
+    "generic":   {"label": "generic - ref_latents/reference_latents",   "channels": ("ref_latents", "reference_latents", "positional")},
 }
 
-# 传输覆盖：只影响 ElementStrengthSchedule 去哪个槽位找参考，不参与家族判断，
-# 因此不影响下游 Encode 的 conditioning 分支（两者是正交的两个轴）。
 _CHANNEL_OVERRIDES = {
     "reference_latents": {"label": "channel：reference_latents (kwargs)", "channels": ("reference_latents",)},
     "ref_latents":       {"label": "channel：ref_latents (kwargs)",       "channels": ("ref_latents",)},
@@ -443,7 +463,8 @@ def _scheduled_ref_model(model, strength_schedule, ref_channels=None):
         # QwenImageTransformer2DModel 把 ref_latents 按位置参数传入
         # (.execute(x, t, ctx, attn_mask, ref_latents, ...)，位于 args[1])，
         # _find_ref_slot 的 list/5D 张量分支均可命中；5D x 同样合法。
-        # MiniMax H3 视频模型把 AV latent 当 list 传进来，不可进入本调度。
+        # MiniMax H3 视频模型把 AV latent 当 list 传入，按第一路视频流判断维度，
+        # 输出同样按流分别做差值引导。
 
         #------------debug-------------
         # if not state.get("slot_logged"):
@@ -452,7 +473,10 @@ def _scheduled_ref_model(model, strength_schedule, ref_channels=None):
                          # kind, slot)
         #-------------------------------
         
-        if kind is None or getattr(x, "ndim", None) not in (4, 5):
+        x_ndim = getattr(x, "ndim", None)
+        if x_ndim is None and isinstance(x, (list, tuple)) and x and torch.is_tensor(x[0]):
+            x_ndim = x[0].ndim
+        if kind is None or x_ndim not in (4, 5):
             if kind is None and ref_channels and not state["slot_miss_logged"]:
                 state["slot_miss_logged"] = True
                 logging.warning("[TileSchedule] 指定的参考通道 %s 未出现在本次前向中；"
@@ -470,7 +494,7 @@ def _scheduled_ref_model(model, strength_schedule, ref_channels=None):
             refs = kwargs[slot]
             if not state["minimax_logged"]:
                 state["minimax_logged"] = True
-                logging.info("[TileSchedule] MiniMax-H3-Image references ride in "
+                logging.info("[TileSchedule] MiniMax H3 references ride in "
                              "minimax_payload; per-step reference strength strips refs.")
         else:
             refs = args[slot] if kind == "args" else kwargs[slot]
@@ -500,7 +524,10 @@ def _scheduled_ref_model(model, strength_schedule, ref_channels=None):
         if safe_strip:                                            
             args2, kwargs2 = _drop_refs_no_cache(executor, args2, kwargs2)
         out_without = executor(x, timesteps, context, *args2, **kwargs2)
-        return out_without + s * (out_with - out_without)
+        if torch.is_tensor(out_with):
+            return out_without + s * (out_with - out_without)
+        # AV 模型逐流返回 [video, audio]，两路结果同样逐流混合
+        return [b + s * (a - b) for a, b in zip(out_with, out_without)]
 
 
     options = patched.model_options.setdefault("transformer_options", {})
@@ -772,25 +799,37 @@ def _minimax_rgb(pixels, width, height):
 def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_px,
                                      reference_method=None, encode_negative=False, qwen21=False,
                                      global_pixels=None, global_ref_latent=None, negative_prompt="",
-                                     krea2=False, minimax=False):
+                                     krea2=False, minimax=False, minimax_video=False):
     samples = tile_pixels[:1].movedim(-1, 1)
     dual = global_pixels is not None and global_ref_latent is not None
     if minimax:
-        # MiniMax-H3-Image：参考走 conditioning 的 minimax_refs（core 每步原样
-        # 重注入），vision 槽同时以 "Picture 1: " + 图像块喂给 Qwen3-VL。目标块
-        # 自身始终是 Picture 1。core 的图像节点没有尺寸参数（vision 固定 1024
-        # 短边、VAE 参考 1024–2048），这里把 grounding_px 映射成 vision 短边：
-        # 0 = 官方 1024。p-h3-image 沿用 core 的面积规则与 edit 前缀。
+        # MiniMax-H3-Image / H3-Video：参考走 conditioning 的 minimax_refs（core
+        # 每步原样重注入），vision 槽同时把图像块喂给 Qwen3-VL。目标块自身始终是
+        # Picture 1。图像模型没有尺寸参数（vision 固定 1024 短边、VAE 参考
+        # 1024–2048），这里把 grounding_px 映射成 vision 短边：0 = 官方 1024。
+        # p-h3-image 与 H3 视频模型沿用 core 的面积规则与编辑前缀 / 参考标签。
         height, width = tile_pixels.shape[1], tile_pixels.shape[2]
         ph3 = "ph3" in type(getattr(clip, "tokenizer", None)).__name__.lower()
-        if ph3:
+        if minimax_video:
+            # 视频模型的 ref2va 参考按 "<Picture 1>: " 标签送入；vision 默认
+            # 对齐 p-h3 图像规则的 1MP 面积，VAE 参考与目标块同面积（match）。
+            vision = int(grounding_px or 0)
+            if vision > 0:
+                vw, vh = _minimax_ref_size(width, height, vision, vision)
+            else:
+                vw, vh = _minimax_area_size(width, height, _MINIMAX_PH3_VISION_PIXELS)
+            rw, rh = _minimax_area_size(width, height, width * height)
+            picture_label = "<Picture %d>: "
+        elif ph3:
             vw, vh = _minimax_area_size(width, height, _MINIMAX_PH3_VISION_PIXELS)
             rw, rh = _minimax_area_size(width, height, width * height)
+            picture_label = "Picture %d: "
         else:
             vision = int(grounding_px or 0)
             short = vision if vision > 0 else _MINIMAX_IMAGE_SHORT_EDGE
             vw, vh = _minimax_ref_size(width, height, short, short)
             rw, rh = _minimax_ref_size(width, height, _MINIMAX_IMAGE_SHORT_EDGE, _MINIMAX_IMAGE_VAE_SHORT_EDGE)
+            picture_label = "Picture %d: "
         images = [_minimax_rgb(tile_pixels, vw, vh)]
         ref_latent = vae.encode(_minimax_rgb(tile_pixels, rw, rh))
         extra = {"minimax_refs": [{"kind": "image", "latent_h": ref_latent.shape[-2],
@@ -800,7 +839,7 @@ def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_p
             raw = (prompt or "").strip()
             text = raw if _MINIMAX_EDIT_VERBATIM.match(raw) else "Edit <Picture 1>. " + (prompt or "")
         positive = clip.encode_from_tokens_scheduled(
-            clip.tokenize(text, images=images, picture_label="Picture %d: "))
+            clip.tokenize(text, images=images, picture_label=picture_label))
     elif krea2:
         # Krea 2 的训练配方是 Qwen3-VL + _GROUNDING_TEMPLATE（Describe the image...）
         # 且 vision 按最长边截断；不能套 2509 的 "Picture 1:" + 384² 面积桶。
@@ -852,7 +891,7 @@ def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_p
             negative = _grounded_conditioning(clip, negative_prompt, tile_pixels, grounding_px)
         elif minimax:
             negative = clip.encode_from_tokens_scheduled(
-                clip.tokenize(negative_prompt or "", images=images, picture_label="Picture %d: "))
+                clip.tokenize(negative_prompt or "", images=images, picture_label=picture_label))
         else:
             negative = clip.encode_from_tokens_scheduled(
                 clip.tokenize(negative_prompt or "", images=images, prevent_empty_text=True))
@@ -992,7 +1031,6 @@ def _axis_ramp(size, fade_start, fade_end, device, dtype):
         
     return ramp
 
-
 def _split_frequencies(image, radius):
     """Split a BHWC image into (low, high) about `radius` pixels, so high = image - low."""
     radius = max(1, int(radius))
@@ -1002,18 +1040,6 @@ def _split_frequencies(image, radius):
     low = F.interpolate(small, size=(h, w), mode="bicubic", align_corners=False)
     low = low.permute(0, 2, 3, 1)
     return low, image - low
-
-
-# def _detail_weight(weight, weight_max):
-    # """Near-exclusive blend weight for the detail band, so doubled contours cannot survive."""
-    # relative = weight / weight_max.clamp(min=1e-8)
-    # return ((relative - 1.0) * _DETAIL_SHARPNESS + 1.0).clamp(0.0, 1.0)
-
-# def _detail_weight(weight, weight_max):
-    # """Moderately steep competition weight: smooth (no seam) but strong
-    # enough that the dominant tile clearly wins the high-frequency band."""
-    # relative = (weight / weight_max.clamp(min=1e-8)).clamp(0.0, 1.0)
-    # return (relative ** 3) * (3.0 - 2.0 * relative) ** 2   # smoothstep * relative²
 
 def _detail_weight(weight, weight_max):
     relative = (weight / weight_max.clamp(min=1e-8)).clamp(0.0, 1.0)
