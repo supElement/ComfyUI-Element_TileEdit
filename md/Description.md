@@ -345,6 +345,8 @@
 | 参数 | 类型 | 默认 | 说明 | 注意事项 |
 |---|---|---|---|---|
 | `reference_strength` | STRING | `"1.0,1.0,1.0,0.8,0.5"` | 逐 step 参考强度列表。 | 语义同 TiledUpscale。见下方详解。 |
+| `model_type` | COMBO | `auto` | 模型家族。auto = 按已加载模型识别。 | 手动指定后同时决定本节点的参考通道和下游 `ElementTileEncode` 的 conditioning 分支（经 MODEL 传递），只需在这里选一次。 |
+| `channel_override` | COMBO | `auto` | 参考通道覆盖（调试用）。 | 仅在自定义节点改写了参考传入方式时使用；只影响本节点，不改变下游 Encode 的家族判断。 |
 
 ### `reference_strength` 详解
 
