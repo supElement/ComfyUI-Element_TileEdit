@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI-Element_TileEdit"
 description = "An extension for tile-based editing, refinement, and upscaling, designed specifically for image editing models (such as Qwen-Image 2.1 / Edit 2509 / 2511, FLUX.3/FLUX.2 klein, Krea 2+lora, Moss +lora, MiniMax-H3-Image)."
-version = "0.6.9"
+version = "0.7.0"
 license = {file = "LICENSE"}
 
 
