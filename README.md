@@ -55,13 +55,7 @@
 
 > 节点的全部价值建立在**模型具备参考潜空间参考能力**之上。用 SDXL、普通 Flux t2i、Qwen-Image-2512 这类无参考能力的模型时，它会退化成普通的 tiled img2img——此时它**并不比 TTP 等工具更好**。
 
-#### 2. 模型识别依赖逆向工程，可能存在 comfyUI 跨版本稳定性
-
-> 对模型的识别依赖**类名子串匹配**（`"flux" in type(dm).__name__.lower()`）、**tokenizer 签名反射**（`inspect.signature`）和 `vars()` 遍历。这些都不是稳定 API。
-> 
-> Krea2 的 in-context 路径是**手动重建前向传播**，直接调用 `dm.blocks`、`dm.pe_embedder`、`img_slice` 等内部结构；Patch 节点还依赖 core 的 `extra_conds` object-patch 与 DIFFUSION_MODEL wrapper 机制。一旦上游模型实现变动（改名、改签名、改内部布局），节点很可能**静默出错或直接崩溃**。
-
-#### 3. 性能与显存开销更大(在可接受范围内)
+#### 2. 性能与显存开销更大(在可接受范围内)
 
 > 每个 tile 都要**独立编码参考 latent**；开启 grounding 时，每个 tile 还要**重新走一遍 text encoder 的 vision 编码**。分块越多，这部分开销线性增长。
 > 
@@ -69,7 +63,10 @@
 > 
 > tile 的 token 数增长时，注意力成本按**平方**增长，因此自动 tile 尺寸被限制在 1024–1536。identity-edit LoRA 的训练分辨率上限约 2MP，tile 请尽量不超过 2MP（1536²≈2.36MP 已越界，1408²≈1.98MP 贴上限）。
 
-#### 4. 不保证对未适配模型的正确性
+#### 3. 不保证对未适配模型的正确性
+
+> 本扩展适配的家族为：Krea 2（identity-edit）、MiniMax-H3-Image、p-h3-image、Qwen Image 2.1、Qwen Edit 2509/2511、FLUX.2 Klein、FLUX.3 Klein、MOSS-Image，以及支持 reference_latents 的通用模型。其它模型（Qwen-Image-2512、SDXL系列、普通 Flux t2i 等）会退化为普通 tiled img2img。
+> 已适配模型只需在 **Element Strength Schedule** 里选一次 `model_type`（auto = 自动识别），Encode 会随 MODEL 读取同一选择；不接 Schedule 时 Encode 自动识别。Krea2 的 identity-edit 需打开 reference_mode，其 in-context 前向需要随上游内部布局同步适配的部分。
 
 ---
 
@@ -174,7 +171,7 @@
 - 减小 tile_size（分块更多、单块更小）。Edit 2509/2511 可额外降低 grounding_px；Qwen 2.1 的 grounding_px 不参与计算，只能减小 tile_size。
 
 **MiniMax-H3-Image 放大后位置漂移？**  
-- MiniMax-H3-Image 不适合处理分块分辨率低的图像。处理：把每块生成分辨率提到 4MP 左右。
+- MiniMax-H3-Image 不适合处理分块分辨率低的图像。处理：把每块生成分辨率提高到 4MP 左右。
 
 **SDXL 等普通模型能用吗？**  
 - 能。节点会自动退化为普通分块 img2img，参考 latent 被模型忽略，用 denoise 控制细节强度（0.2 – 0.5 起试）。
