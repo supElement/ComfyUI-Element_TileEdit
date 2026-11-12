@@ -22,7 +22,7 @@
 > ⚠️ 使用 Moss 模型编辑需要搭配 [Moss-Image-Edit](https://huggingface.co/chinoll/Moss-Image-Edit/tree/main) lora。
 ---
 
-<img width="2379" height="1093" alt="image" src="https://github.com/user-attachments/assets/1464d90d-e044-4423-9d27-7fa2a581a66e" />
+<img width="2393" height="1096" alt="image" src="https://github.com/user-attachments/assets/73decc5b-71c1-4702-8b24-8ebb70ef6cc5" />
 
 ---
 
