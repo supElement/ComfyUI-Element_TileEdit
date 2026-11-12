@@ -80,9 +80,9 @@
 | **FLUX.2 klein base** | **0.7 – 1.0** | 仅 reference-latent 通道（text encoder 为纯文本，无 vision grounding） | ★★★★ | 缺少 vision 通道, 面部有些油, 偏色, 可使用[Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 做色彩或变形校正，搭配防偏移类lora使用时可提升至★★★★☆ |
 | **Krea2 + krea2_identity_edit** | **0.7 – 0.8** | 手动重建 `[text｜source(frame=1)｜target(frame=0)]` in-context 前向 | ★★★☆ | 高降噪下色彩一致性最好，但有时会出现脏点，0.7–0.8 是清晰度与稳定的最佳平衡点 |
 | **MiniMax-H3-Image** | **0.8 - 1.0** | conditioning 的 `minimax_refs` 参考通道（每步原样重注入）+ `Picture 1:` vision | ★★★☆ | 参考作为独立序列段注入，vision 短边 1024、VAE 参考短边 1024–2048。推荐分块分辨率 4MP 左右，分辨率低时锁不住构图，结构会漂移。|
-| **MiniMax-H3-Video** | **0.8 - 1.0** | 同 H3-Image 的 `minimax_refs` + `<Picture 1>:` vision；采样 latent 为 `(video, 全零 audio)` 两条流，解码只取视频流 | ★★★☆ | 仅拆分节点工作流。把 H3-Image 工作流里的模型换成 H3 视频模型即可；参考尺寸按 p-h3 图像规则（vision 1MP 面积、VAE 参考与块同面积）。采样进度条里的音频流会被生成但丢弃。 |
 | **FLUX.3 klein turbo** | **0.7 – 0.8** | text encoder 仅文本有效，无 vision grounding | ★★★ | 缺少细节、易变形（也可能是comfyUI实现的问题），优点是不容易脏 |
 | **FLUX.2 klein turbo** | **0.7 – 0.8** | 仅 reference-latent 通道（text encoder 为纯文本，无 vision grounding） | ★★★ | 缺少 vision 通道，参考信号弱一档，很容易脏、偏色, 可使用[Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 做色彩或变形校正，搭配防偏移类lora使用时可提升至★★★☆ |
+| **MiniMax-H3-Video** | **0.8 - 1.0** | 同 H3-Image 的 `minimax_refs` + `<Picture 1>:` vision；采样 latent 为 `(video, 全零 audio)` 两条流，解码只取视频流 | ★★☆ | 仅拆分节点工作流。把 H3-Image 工作流里的模型换成 H3 视频模型即可；参考尺寸按 p-h3 图像规则（vision 1MP 面积、VAE 参考与块同面积）。采样进度条里的音频流会被生成但丢弃。 缺少细节|
 | **MOSS-Image + Moss-Image-Edit** | **0.7 – 1** | 原生 `reference_latents` 通道，采用 `index_timestep_zero_text_start` 布局；ComfyUI 自动预计算 `ref_kv` 加速 | ★★☆ | 新版comfyUI 原生支持 Edit LoRA。借助 1:1 尺寸参考注入。视觉语义补全、全局语境理解以及先验知识方面较弱，结果细节不足，偏模糊。因涉及首步 K/V 预计算，第一步耗时略长。推荐搭配 ComfyUI 最新版本（#17296）。 |
 | **Qwen-Image-2512/SDXL系列** | **0.2 – 0.5** | 无 | ★ | 非编辑模型无一致性锚定，即使接入ipadapter等方法，效果依然有限 |
 
