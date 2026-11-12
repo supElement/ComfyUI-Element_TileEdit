@@ -343,7 +343,9 @@ Attaches a per-step `reference_strength` schedule to the model.
 
 | Parameter | Type | Default | Description | Notes |
 |---|---|---|---|---|
-| `reference_strength` | STRING | `"1.0,1.0,1.0,0.8,0.5"` | Per-step reference strength list. | Same semantics as TiledUpscale. See details below. |
+| `reference_strength` | STRING | `"1.0,1.0,1.0,0.8,0.5"` | A list of reference strengths, applied step-by-step. | Same semantics as in TiledUpscale. See detailed explanation below. |
+| `model_type` | COMBO | `auto` | Model family. `auto` = Automatically detected based on the currently loaded model. | Manually specifying this determines both the reference channel for this node and the conditioning branch for downstream `ElementTileEncode` nodes (passed via the `MODEL` connection). You only need to set this once here. |
+| `channel_override` | COMBO | `auto` | Reference channel override (for debugging). | Use only when the reference input method has been modified by a custom node. This affects only the current node and does not alter the model family detection for downstream encoding operations. |
 
 ### `reference_strength` Details
 
