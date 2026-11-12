@@ -43,7 +43,7 @@
 | `denoise` | FLOAT 0–1 | 1.0 | 重画强度。 | 对内部调度透明：denoise 只改 sigma 范围，不改前向次数，所以不影响 `reference_strength` 的逐步对应关系。 |
 | `reference_mode` | BOOLEAN | False | ON = Krea 2 identity-edit（`[text | source | target]` in-context 布局）；OFF = 通用 conditioning 路径。 | **只对 Krea 2 有效**。非 Krea 2 模型打开会**自动回落**到 conditioning 并打 warning。打开时 `clip` 必须接。 |
 | `redo_first_tile` | BOOLEAN | True | 所有块跑完后，重画第一块一次，让它参考已完成邻块。 | 只有块数 > 1 时生效。会多一次采样开销。 |
-| `grounding_px` | INT 0–4096 (step 32) | 768 | 文本编码器视觉槽尺寸。 | Qwen Edit 2509/2511：面积桶，`0` 或 `≥384` = 官方 384×384；Qwen Image 2.1：**忽略**；Krea 2：限制 vision 输入最长边，`0` = 用 tile 尺寸。 |
+| `grounding_px` | INT 0–4096 (step 32) | 768 | 文本编码器视觉槽尺寸。 | Qwen Edit 2509/2511：面积桶，`0` 或 `≥384` = 官方 384×384；Qwen Image 2.1：**忽略**；Krea 2：限制 vision 输入最长边，`0` = 用 tile 尺寸；MiniMax-H3-Image：vision 短边，`0` = 官方 1024。 |
 | `reference_strength` | STRING | `"1.0,1.0,0.95,0.9,0.8"` | 逐 step 参考强度列表。 | 数量少则重复末值，多则只用前段。分隔符：`, ， 、 : ： ; ； 空格`。`1.0` = 原行为；`0.0` = 该步完全无参考；`0/1` 走 binary 单前向；`0~1` 之间走 guidance **双前向**（≈cfg=2 算力）。全 1 列表零开销。 |
 | `prompt` | STRING 多行 | `"enhance quality preserving all the details"` | 正条件。 | **不能为空**（正条件端口已移除，这是唯一来源）。 |
 | `negative_prompt` | STRING 多行 | `""` | 负条件。 | 留空 = 编码空字符串。 |
@@ -53,6 +53,7 @@
 | 模型条件 | 走哪条 | 备注 |
 |---|---|---|
 | `reference_mode=True` 且是 Krea 2 | in_context | `[text | source | target]` 布局。 |
+| MiniMax-H3-Image（自动识别） | grounded 子分支：vision 图 + `minimax_refs` 参考，每步原样重注入 | 仅图像模型；H3 视频模型只在拆分版工作流里支持。 |
 | prompt 非空 且 tokenizer 处理图像 且 **非** FLUX.2 系 | grounded_conditioning | 每块原始像素进 vision 槽，不挂 `reference_latents`。 |
 | 其余 | 通用 reference-latents | 每块挂本块 latent。 |
 
@@ -78,12 +79,9 @@
 
 | 端口 | 类型 | 说明 |
 |---|---|---|
-| `split_images` | IMAGE 列表 | **已重采样到 `gen_w × gen_h`** 的每块图（不是原始 crop）。接 Encode 用。 |
-| `original_image` | IMAGE | 源图。接 Merge 的 `original_image` 用。 |
-| `prompt` | STRING 列表 | 每块正条件（layer + global 合成后）。 |
-| `negative_prompt` | STRING 列表 | 每块负条件。 |
-| `grid` | GRID | 结构化 JSON。接 Encode / Merge。 |
-| `tile_masks` | MASK 列表 | 每块的采样 mask。开启 `edge mask` 时非全白；**必须**接到 Encode 的 `tile_masks`（Encode 已设为必填端口）。 |
+| `tile_info` | TILEINFO | 打包对象，含分块图 / 源图 / 提示词 / mask / grid。接 **Element Tile Info** 展开成具体端口。 |
+
+> 节点内预览（`ui`）照旧显示，不需要连线。
 
 ### 三种模式
 
@@ -105,7 +103,7 @@
 | `Cols / Rows` | 2 / 2 | count 模式的行列。 | 只在 count 模式生效。 |
 | `tile` | 1024 | size 模式的目标尺寸。 | 只在 size 模式生效。 |
 | `overlap px / %` | 64px | 重叠。点 `px` / `%` 按钮切换单位。 | 两种都改，只有当前激活的生效。**不设上限**，填多少用多少。 |
-| `edge mask` | 关 | 把 overlap 外圈用 mask 锁住：采样时该带不重绘，只作参考；Merge 端自动剔除。 | 必须把 Split 的 `tile_masks` 接到 Encode（该端口已设为必填，未连会直接报错）。详见下方"锁边"。 |
+| `edge mask` | 关 | 把 overlap 外圈用 mask 锁住：采样时该带不重绘，只作参考；Merge 端自动剔除。 | 必须把 Element Tile Info 的 `tile_masks` 接到 Encode（该端口已设为必填，未连会直接报错）。详见下方"锁边"。 |
 | `lock` | 90% | 锁边带宽 = `overlap/2 × lock%`（0–100%）。 | 默认 90。100 = 半边 overlap 全部锁住，Merge 剔除会饱和在 `overlap/2`，重叠区几乎没有参与合成的重绘内容，一般不建议常用。 |
 | `feather` | 50% | 锁定带**内部**的羽化比例（0–100%，相对锁定带宽度）。 | 外沿恒为 mask=0，向块内渐变到 1，不侵占带外的可重绘区；100% = 渐变正好覆盖整条锁定带。Merge 只剔除锁定带本身。 |
 | `fill gaps` | 开 | 自动补框外未覆盖区域。 | 只对 manual 模式有效。 |
@@ -121,7 +119,7 @@
 - 每边最多剔到 `overlap/2 − 1px`。`lock=100%` 时正好顶到中线并触发限幅 + warning，留给 Merge 羽化的中段几乎没有，一般不建议。
 - **手绘块的倒角同步锁定**：锁定带会沿圆角绕过去。采样轮廓 = 外扩轮廓按锁定带宽整体内缩（圆角**同心**内缩：圆心不变，半径从 `r + overlap/2` 减到 `r + overlap/2 − 锁定带`），所以倒角处的 `mask=0` 是一条与直边等宽的带，而不是把整个倒角切成一大片黑角。没有倒角（半径 0）的框完全走原来的四边带逻辑。与直边带一致：轮廓内侧恒为 1（可重绘），羽化落在轮廓**外侧**的锁定区，从轮廓向外按 `feather` 宽度渐变到 0（不是硬切）。一个角涉及两条边时按较大的锁定带内缩；贴画布边（无邻居）的一侧带宽为 0。
 - 例：`overlap=100px, lock=50%` → 锁定带 25px；`feather=100%` → 这 25px 全部是渐变（外沿 0 → 内沿 1）；`feather=50%` → 外 12.5px 实锁、内 12.5px 渐变。
-- 链路：Split 的 `tile_masks` → Encode 的 `tile_masks`，**必接**。Encode 已把该端口设为必填，未连接时 ComfyUI 在排队阶段就会报错，不会跑完采样才发现锁边没生效。
+- 链路：Element Tile Info 的 `tile_masks` → Encode 的 `tile_masks`，**必接**。Encode 已把该端口设为必填，未连接时 ComfyUI 在排队阶段就会报错，不会跑完采样才发现锁边没生效。
 
 ---
 
@@ -188,6 +186,8 @@
 
 ### 输出注意事项
 
+以下端口都通过 **Element Tile Info** 拆出：
+
 - `split_images` 已经按 `gen_w × gen_h` 扩展了边缘。
 - `tile_masks` 与分块一一对应；未开启 `edge mask` 时全是全白 mask。
 - **输入图尺寸无需被 `div` 整除**：分块画布向上对齐 `div`，多出的边缘由贴边块整体向内平移吸收（crop 全部来自真实像素）；只有贴着画布边、无法再内移的整幅单块，才用边缘像素复制补齐到画布尺寸，Merge 仍裁回真实尺寸。
@@ -195,6 +195,31 @@
 - **`div` 只约束每块的生成分辨率**：分块按 `round_div(crop × upscale)` 取整；整幅单块按画布尺寸生成（1924 → 1936），输出仍裁回 1924。生成分辨率始终是 `div` 的整数倍，但不会改变输出尺寸。
 - 分块总数上限 `MAX_TILES = 256`，超过直接抛错。
 - 后端发现 tiles 为空时会退化为"整幅单块"，并打 warning。
+
+---
+
+## Element Tile Info（拆分版中转节点）
+
+把 Split 的单个 `tile_info` 端口展开成六个输出，无参数。
+
+### 输入端口
+
+| 端口 | 类型 | 必接 | 说明 |
+|---|---|---|---|
+| `tile_info` | TILEINFO | 是 | 来自 Split 的 `tile_info`。 |
+
+### 输出端口
+
+| 端口 | 类型 | 说明 |
+|---|---|---|
+| `split_images` | IMAGE 列表 | **已重采样到 `gen_w × gen_h`** 的每块图（不是原始 crop）。接 Encode 的 `tile_images`。 |
+| `tile_masks` | MASK 列表 | 每块的采样 mask。开启 `edge mask` 时非全白；接 Encode 的 `tile_masks`（必填）。 |
+| `prompt` | STRING 列表 | 每块正条件（layer + global 合成后）。接 Encode 的 `tile_prompts`。 |
+| `negative_prompt` | STRING 列表 | 每块负条件。接 Encode 的 `tile_negatives`。 |
+| `grid` | GRID | 结构化 JSON。接 Merge 的 `grid`。 |
+| `original_image` | IMAGE | 源图。接 Merge 的 `original_image`。 |
+
+> 端口顺序与旧版 Split 不同（`tile_masks` 在第二位、`original_image` 在最后），旧工作流需要重连。
 
 ---
 
@@ -209,10 +234,10 @@
 | `model` | MODEL | 是 | 用于取 alignment、判断是否 Krea 2、判断是否 grounded。 |
 | `vae` | VAE | 是 | 编码每块图像。 |
 | `clip` | CLIP | 是 | 编码正/负条件。 |
-| `tile_images` | IMAGE 列表 | 是 | 来自 Split 的 `split_images`。 |
-| `tile_prompts` | STRING 列表 | 是 | 来自 Split 的 `prompt`。 |
-| `tile_negatives` | STRING 列表 | 是 | 来自 Split 的 `negative_prompt`。 |
-| `tile_masks` | MASK 列表 | **是** | 来自 Split 的第 6 个输出 `tile_masks`。白色 = 重绘，黑色 = 保留作参考。未开 `edge mask` 时是整列全白，接了也无害；**不接则 ComfyUI 直接拒绝执行**，避免开了锁边却白跑采样。 |
+| `tile_images` | IMAGE 列表 | 是 | 来自 Element Tile Info 的 `split_images`。 |
+| `tile_masks` | MASK 列表 | **是** | 来自 Element Tile Info 的 `tile_masks`。白色 = 重绘，黑色 = 保留作参考。未开 `edge mask` 时是整列全白，接了也无害；**不接则 ComfyUI 直接拒绝执行**，避免开了锁边却白跑采样。 |
+| `tile_prompts` | STRING 列表 | 是 | 来自 Element Tile Info 的 `prompt`。 |
+| `tile_negatives` | STRING 列表 | 是 | 来自 Element Tile Info 的 `negative_prompt`。 |
 
 ### 输出端口
 
@@ -228,15 +253,25 @@
 | 参数 | 类型 | 默认 | 说明 | 注意事项 |
 |---|---|---|---|---|
 | `reference_mode` | BOOLEAN | False | ON = Krea 2 identity-edit（in-context 布局）；OFF = conditioning（视 tokenizer 能力自动 grounded）。 | **只对 Krea 2 有效**。ON 时非 Krea 2 会 fallback 到 conditioning 并打 warning。ON 时直接把本节点的 `model` 输出接 KSampler 即可（in-context 补丁已自动补）；只有坚持用原始 MODEL 时，才需要在 KSampler 前手动接 `Krea2 In-Context Patch`。 |
-| `grounding_px` | INT 0–4096 (step 32) | 768 | 视觉槽尺寸。 | 语义同 TiledUpscale。 |
+| `grounding_px` | INT 0–4096 (step 32) | 768 | 视觉槽尺寸。 | Qwen Edit 2509/2511：面积桶（`0` 或 `≥384` = 官方 384×384）；Qwen Image 2.1：忽略；Krea 2：限制 vision 最长边；MiniMax-H3-Image：vision 短边，`0` = 官方 1024；MiniMax-H3-Video：vision 短边，`0` = p-h3 图像规则的 1MP 面积（VAE 参考与块同面积）。 |
 
 ### 分支行为（自动）
 
 | 条件 | 分支 |
 |---|---|
 | `reference_mode=True` 且是 Krea 2 | in_context（挂 `reference_latents + index_timestep_zero`） |
+| MiniMax-H3-Image / H3-Video（自动识别） | grounded 子分支：vision 图 + conditioning 的 `minimax_refs` 参考，每步原样重注入 |
 | `reference_mode=False` 且 prompt 非空 且 tokenizer 处理图像 且 **非** FLUX.2 | grounded |
 | 其余 | 通用 reference-latents |
+
+### MiniMax-H3-Video（仅拆分版）
+
+把 H3-Image 工作流里的模型换成 H3 视频模型即可，Encode 自动识别，其它连线不变：
+
+- 每块 latent 打包成 `(video, 全零 audio)` 两条流交给视频模型采样，音频流只为满足 AV 打包；
+- KSampler 输出是嵌套 latent，VAEDecode 自动只解视频流，音频流丢弃；
+- 参考标签使用视频模型的 `<Picture 1>: `；
+- shift 由模型管道上的 `ModelSamplingMiniMaxH3` 决定（视频模型默认 12/3）。Encode 不写任何 shift 值，该节点接在 Encode 前或后都能覆盖模型内置默认值。
 
 ### 配套补丁
 
@@ -258,7 +293,7 @@
 | 端口 | 类型 | 必接 | 说明 |
 |---|---|---|---|
 | `tile_images` | IMAGE 列表 | 是 | 每块生成结果（KSampler → VAE Decode 后的）。 |
-| `grid` | GRID | 是 | 来自 Split。 |
+| `grid` | GRID | 是 | 来自 Element Tile Info 的 `grid`。 |
 | `feather` | FLOAT 0–1 | 是 | 羽化强度（同层手绘块之间在可重绘中段内取值；对背景一侧按整个重叠区居中）。默认 1.0。 |
 | `tile_sources` | IMAGE 列表 | 否 | 每块原图。颜色匹配的参考。 |
 | `original_image` | IMAGE | 否（**建议接**） | 底图。不接时边缘 alpha < 1 可能发黑。 |
@@ -298,7 +333,7 @@
 - 开启 Split 的 `edge mask` 时，只有**同一层的相邻手绘块之间**会把过渡带收缩到两块锁定带之间；手绘块对着背景的一侧从本块剔除边界起算、以手绘框边为 50% 点，所以 `lock` 再大也不会吃掉手绘框的边和倒角，也不会在剔除边界拉出硬切。同一层内锁定带越宽，中段越窄（单侧过渡宽度 = `overlap/2 − 本块锁定带`，`lock` 太大时同一层的两块之间会只剩一条硬接线），要宽过渡就把 `lock` 放小。背景块不受影响，始终按整个重叠区过渡。
 - **倒角只看本节点的 `feather`**：Split 的 `corner feather` 只用于采样锁边（往里渐变），Merge 端不再拿外扩轮廓或方块边界切倒角。
 
-可以使用另一个扩展中的 [Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 替代，Smart merge images 对色彩和畸变校正的处理结果更好。接 Split 的 `grid` 时它直接沿用本节点的 alpha / feather 几何（居中斜坡、同层锁定带之间的过渡、手绘圆弧倒角），手绘块的锁定带一样会被剔除，背景块不剔除。
+可以使用另一个扩展中的 [Smart merge images节点](https://github.com/supElement/ComfyUI_Element_easy) 替代，Smart merge images 对色彩和畸变校正的处理结果更好。接 Element Tile Info 的 `grid` 时它直接沿用本节点的 alpha / feather 几何（居中斜坡、同层锁定带之间的过渡、手绘圆弧倒角），手绘块的锁定带一样会被剔除，背景块不剔除。
 
 ---
 
@@ -345,7 +380,7 @@
 | 参数 | 类型 | 默认 | 说明 | 注意事项 |
 |---|---|---|---|---|
 | `reference_strength` | STRING | `"1.0,1.0,1.0,0.8,0.5"` | 逐 step 参考强度列表。 | 语义同 TiledUpscale。见下方详解。 |
-| `model_type` | COMBO | `auto` | 模型家族。auto = 按已加载模型识别。 | 手动指定后同时决定本节点的参考通道和下游 `ElementTileEncode` 的 conditioning 分支（经 MODEL 传递），只需在这里选一次。 |
+| `model_type` | COMBO | `auto` | 模型家族。auto = 按已加载模型识别。 | 手动指定后同时决定本节点的参考通道和下游 `ElementTileEncode` 的 conditioning 分支（经 MODEL 传递），只需在这里选一次。`minimax` 一项同时适用于 H3-Image 与 H3 视频模型。 |
 | `channel_override` | COMBO | `auto` | 参考通道覆盖（调试用）。 | 仅在自定义节点改写了参考传入方式时使用；只影响本节点，不改变下游 Encode 的家族判断。 |
 
 ### `reference_strength` 详解
@@ -369,4 +404,4 @@
 - **不要和 TiledUpscale 一起用**：一体化内部已挂同名 patch，重复接会被 `_strip_owned_patches` 摘掉再重挂，属于多余操作。
 - 分隔符里"小数请用英文句点 `0.8`"，用中文句点会解析失败。
 - 可接收 [Element_listGraph_Curve](https://github.com/supElement/ComfyUI_Element_easy) 的 strength_string 输出。
-- 参数设置越低，越会出现漂移，为保证一致性，前几步数值设置要高，建议前几步设置为1，后面几步可根据所使用的模型适当降低，这种设置对修复瑕疵更有利。 denoise 不影响本参数；vision/grounding 类参考不受本参数影响。对非图像编辑模型，如sdxl、Qwen image 2512等模型无效。
+- 参数设置越低，越会出现漂移，为保证一致性，前几步数值设置要高，建议前几步设置为1，后面几步可根据所使用的模型适当降低，这种设置对修复瑕疵更有利。denoise 不影响本参数；Qwen 类的 vision/grounding 参考（写在文本条件里）不受本参数影响，MiniMax 的 `minimax_refs` 参考受本参数控制（取 0 的那一步会把 refs 整个摘掉）。MiniMax-H3-Video 这类 AV 模型同样支持：两条流各自做差值引导。对非图像编辑模型，如sdxl、Qwen image 2512等模型无效。

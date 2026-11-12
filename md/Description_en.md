@@ -43,7 +43,7 @@ Does everything in one pass: upscale → split into tiles → re-render each til
 | `denoise` | FLOAT 0–1 | 1.0 | Re-render strength. | Transparent to internal scheduling: denoise only changes the sigma range, not the forward pass count, so it doesn't affect `reference_strength`'s per-step correspondence. |
 | `reference_mode` | BOOLEAN | False | ON = Krea 2 identity-edit (`[text | source | target]` in-context layout); OFF = generic conditioning path. | **Only works with Krea 2**. On non-Krea 2 models, turning it ON **auto-falls back** to conditioning with a warning. `clip` must be connected when ON. |
 | `redo_first_tile` | BOOLEAN | True | After all tiles finish, re-renders the first tile once so it can see finished neighbors. | Only effective when tile count > 1. Costs one extra sampling pass. |
-| `grounding_px` | INT 0–4096 (step 32) | 768 | Text encoder vision-slot size. | Qwen Edit 2509/2511: area bucket, `0` or `≥384` = official 384×384; Qwen Image 2.1: **ignored**; Krea 2: caps the vision input's longest side, `0` = use tile size. |
+| `grounding_px` | INT 0–4096 (step 32) | 768 | Text encoder vision-slot size. | Qwen Edit 2509/2511: area bucket, `0` or `≥384` = official 384×384; Qwen Image 2.1: **ignored**; Krea 2: caps the vision input's longest side, `0` = use tile size; MiniMax-H3-Image: vision short edge, `0` = official 1024. |
 | `reference_strength` | STRING | `"1.0,1.0,0.95,0.9,0.8"` | Per-step reference strength list. | Fewer values → last value repeats; more → only leading values used. Separators: `, ， 、 : ： ; ； space`. `1.0` = original behavior; `0.0` = that step has no reference; `0/1` uses binary single-forward; between `0~1` uses guidance **dual-forward** (≈cfg=2 cost). All-1 list = zero overhead. |
 | `prompt` | STRING multiline | `"enhance quality preserving all the details"` | Positive condition. | **Cannot be empty** (positive port removed; this is the only source). |
 | `negative_prompt` | STRING multiline | `""` | Negative condition. | Empty = encode empty string. |
@@ -53,6 +53,7 @@ Does everything in one pass: upscale → split into tiles → re-render each til
 | Model condition | Route | Notes |
 |---|---|---|
 | `reference_mode=True` and Krea 2 | in_context | `[text | source | target]` layout. |
+| MiniMax-H3-Image (auto-detected) | grounded sub-branch: vision image + `minimax_refs` references, re-injected verbatim every step | Image model only; the H3 video model is supported in the split-version workflow only. |
 | prompt non-empty AND tokenizer handles images AND **not** FLUX.2 family | grounded_conditioning | Per-tile raw pixels go into vision slots; no `reference_latents` attached. |
 | otherwise | generic reference-latents | Each tile attaches its own latent. |
 
@@ -79,12 +80,9 @@ Pure geometric splitting + image source intake, no model dependency. At executio
 
 | Port | Type | Description |
 |---|---|---|
-| `split_images` | IMAGE list | Per-tile images **already resampled to `gen_w × gen_h`** (not the raw crop). Connect to Encode. |
-| `original_image` | IMAGE | Source image. Connect to Merge's `original_image`. |
-| `prompt` | STRING list | Per-tile positive condition (after layer + global composition). |
-| `negative_prompt` | STRING list | Per-tile negative condition. |
-| `grid` | GRID | Structured JSON. Connect to Encode / Merge. |
-| `tile_masks` | MASK list | Per-tile sampling mask. Not all-white when `edge mask` is on; **must** be connected to Encode's `tile_masks` (Encode declares it as a required port). |
+| `tile_info` | TILEINFO | Packed object holding tile images / source image / prompts / masks / grid. Connect to **Element Tile Info** to expand it into the individual ports. |
+
+> The in-node preview (`ui`) still works without any wiring.
 
 ### Three Modes
 
@@ -106,7 +104,7 @@ Pure geometric splitting + image source intake, no model dependency. At executio
 | `Cols / Rows` | 2 / 2 | Count mode rows/columns. | Only active in count mode. |
 | `tile` | 1024 | Target size in size mode. | Only active in size mode. |
 | `overlap px / %` | 64px | Overlap. Click `px` / `%` buttons to switch units. | Both values are kept; only the currently active unit takes effect. **No upper cap** — whatever you enter is used. |
-| `edge mask` | off | Lock the outer overlap band with a mask: sampling never repaints it, it's reference only; Merge drops it automatically. | Split's `tile_masks` must be wired into Encode (that port is required, so a missing wire errors out immediately). See "Edge Mask" below. |
+| `edge mask` | off | Lock the outer overlap band with a mask: sampling never repaints it, it's reference only; Merge drops it automatically. | Element Tile Info's `tile_masks` must be wired into Encode (that port is required, so a missing wire errors out immediately). See "Edge Mask" below. |
 | `lock` | 90% | Locked band width = `overlap/2 × lock%` (0–100%). | Default 90. At 100 the whole half-overlap is locked; Merge's exclusion saturates at `overlap/2`, leaving almost no repainted content in the overlap — generally not recommended as a default. |
 | `feather` | 50% | Feather **inside** the locked band, as a percentage of its width (0–100%). | The outer edge stays at mask=0 and the ramp reaches 1 at the band's inner edge, so it never takes repaintable area outside the band. 100% = the ramp covers the whole band. Merge drops only the locked band itself. |
 | `fill gaps` | on | Auto-fill uncovered areas outside boxes. | Only effective in manual mode. |
@@ -122,7 +120,7 @@ When enabled, only edges that **have a neighbor** get a locked band (canvas bord
 - Each side drops at most `overlap/2 − 1px`. At `lock=100%` the band reaches the midline, is clamped, and logs a warning; almost no middle remains for Merge's feather, so it is generally not recommended.
 - **Rounded hand-drawn tiles lock their corners too**: the lock band wraps around the rounded corner. The sampling silhouette is the expanded outline shrunk inward by the lock band (a **concentric** inset: same center, radius reduced from `r + overlap/2` to `r + overlap/2 − band`), so `mask=0` at the corner is a band as wide as the straight edges instead of the whole corner being cut into a large black wedge. Boxes with no rounding (radius 0) keep the original four-edge band logic. Same as the straight bands: inside the silhouette the mask stays 1 (repaintable) and the feather falls on the **outside** of the silhouette, ramping from the arc outward to 0 over the same `feather` width (no hard cut). A corner joins two edges; it is inset by the larger of their bands, and an edge with no neighbour (canvas border) contributes a zero-width band.
 - Examples: `overlap=100px, lock=50%` → band 25px; `feather=100%` → those 25px are a full gradient (0 at the outer edge → 1 at the inner edge); `feather=50%` → outer 12.5px solid, inner 12.5px gradient.
-- Chain: Split's `tile_masks` → Encode's `tile_masks`, **required**. Encode declares this port as required, so ComfyUI errors out at queue time instead of finishing a full sampling pass before you notice the lock was inactive.
+- Chain: Element Tile Info's `tile_masks` → Encode's `tile_masks`, **required**. Encode declares this port as required, so ComfyUI errors out at queue time instead of finishing a full sampling pass before you notice the lock was inactive.
 
 ---
 
@@ -190,12 +188,39 @@ Edge masking is not tied to Qwen Image 2.1: **any model sampled through ComfyUI'
 
 ### Output Notes
 
+All ports below are expanded by **Element Tile Info**:
+
 - `split_images` has already been edge-extended to `gen_w × gen_h`.
 - **The input image does not need to be divisible by `div`**: the canvas is ceil-aligned to `div` and any excess edge is absorbed by shifting the edge tile inward as a whole (its crop comes entirely from real pixels); only a single whole-image tile that is flush with the canvas edge and cannot shift is padded with replicated edge pixels up to the canvas size, and Merge still crops back to the real size.
 - **The Merge output size is always `round(source × U-upscale)`**: at `U-upscale = 1.0` it matches the original image size exactly, with no extra pixels from `div` rounding.
 - **`div` only constrains each tile's generation resolution**: tiled blocks use `round_div(crop × upscale)`; a single whole-image tile is generated at the canvas size (1924 → 1936) and cropped back to 1924. The generation resolution is always a multiple of `div`, but it never changes the output size.
 - Total tile count limit `MAX_TILES = 256`; exceeding it raises an error.
 - If the backend finds no tiles, it degrades to "single whole-canvas tile" and logs a warning.
+
+---
+
+## Element Tile Info (Split Version, Pass-through Node)
+
+Expands Split's single `tile_info` port back into the six outputs. No parameters.
+
+### Input Ports
+
+| Port | Type | Required | Description |
+|---|---|---|---|
+| `tile_info` | TILEINFO | Yes | From Split's `tile_info`. |
+
+### Output Ports
+
+| Port | Type | Description |
+|---|---|---|
+| `split_images` | IMAGE list | Per-tile images **already resampled to `gen_w × gen_h`** (not the raw crop). Connect to Encode's `tile_images`. |
+| `tile_masks` | MASK list | Per-tile sampling mask. Not all-white when `edge mask` is on; connect to Encode's `tile_masks` (required). |
+| `prompt` | STRING list | Per-tile positive condition (after layer + global composition). Connect to Encode's `tile_prompts`. |
+| `negative_prompt` | STRING list | Per-tile negative condition. Connect to Encode's `tile_negatives`. |
+| `grid` | GRID | Structured JSON. Connect to Merge's `grid`. |
+| `original_image` | IMAGE | Source image. Connect to Merge's `original_image`. |
+
+> The port order differs from the old Split node (`tile_masks` is second, `original_image` is last), so old workflows must be re-wired.
 
 ---
 
@@ -210,10 +235,10 @@ Encodes each tile's image / prompt into per-tile LATENT + CONDITIONING, and also
 | `model` | MODEL | Yes | Used for alignment, Krea 2 detection, grounded detection. |
 | `vae` | VAE | Yes | Encodes each tile image. |
 | `clip` | CLIP | Yes | Encodes positive/negative conditions. |
-| `tile_images` | IMAGE list | Yes | From Split's `split_images`. |
-| `tile_prompts` | STRING list | Yes | From Split's `prompt`. |
-| `tile_negatives` | STRING list | Yes | From Split's `negative_prompt`. |
-| `tile_masks` | MASK list | **Yes** | From Split's 6th output, `tile_masks`. White = repaint, black = keep as reference. When `edge mask` is off it is an all-white list, so wiring it is harmless; **without it ComfyUI refuses to run**, avoiding a full sampling pass with the lock silently inactive. |
+| `tile_images` | IMAGE list | Yes | From Element Tile Info's `split_images`. |
+| `tile_masks` | MASK list | **Yes** | From Element Tile Info's `tile_masks`. White = repaint, black = keep as reference. When `edge mask` is off it is an all-white list, so wiring it is harmless; **without it ComfyUI refuses to run**, avoiding a full sampling pass with the lock silently inactive. |
+| `tile_prompts` | STRING list | Yes | From Element Tile Info's `prompt`. |
+| `tile_negatives` | STRING list | Yes | From Element Tile Info's `negative_prompt`. |
 
 ### Output Ports
 
@@ -229,15 +254,25 @@ Encodes each tile's image / prompt into per-tile LATENT + CONDITIONING, and also
 | Parameter | Type | Default | Description | Notes |
 |---|---|---|---|---|
 | `reference_mode` | BOOLEAN | False | ON = Krea 2 identity-edit (in-context layout); OFF = conditioning (auto-grounded depending on tokenizer capability). | **Only works with Krea 2**. When ON, non-Krea 2 falls back to conditioning with a warning. When ON, connect this node's `model` output straight to KSampler (the in-context patch is applied automatically); you only need to insert `Krea2 In-Context Patch` manually if you insist on using the original MODEL. |
-| `grounding_px` | INT 0–4096 (step 32) | 768 | Vision-slot size. | Same semantics as TiledUpscale. |
+| `grounding_px` | INT 0–4096 (step 32) | 768 | Vision-slot size. | Qwen Edit 2509/2511: area bucket (`0` or `≥384` = official 384×384); Qwen Image 2.1: ignored; Krea 2: caps the vision input's longest side; MiniMax-H3-Image: vision short edge, `0` = official 1024; MiniMax-H3-Video: vision short edge, `0` = the p-h3 image rule's 1MP area (the VAE reference matches the tile area). |
 
 ### Branch Behavior (automatic)
 
 | Condition | Branch |
 |---|---|
 | `reference_mode=True` and Krea 2 | in_context (attaches `reference_latents + index_timestep_zero`) |
+| MiniMax-H3-Image / H3-Video (auto-detected) | grounded sub-branch: vision image + `minimax_refs` references, re-injected verbatim every step |
 | `reference_mode=False` AND prompt non-empty AND tokenizer handles images AND **not** FLUX.2 | grounded |
 | otherwise | generic reference-latents |
+
+### MiniMax-H3-Video (Split Version Only)
+
+Just swap the model inside an H3-Image workflow for the H3 video model; Encode detects it automatically and the rest of the wiring stays the same:
+
+- Each tile latent is packed as two streams `(video, all-zero audio)` for the video model; the audio stream only exists to satisfy AV packing.
+- KSampler returns a nested latent; VAEDecode automatically decodes only the video stream and the audio stream is discarded.
+- References use the video model's `<Picture 1>: ` label.
+- Shifts come from `ModelSamplingMiniMaxH3` on the model chain (video model default 12/3). Encode never writes any shift value, so the node overrides the model's built-in defaults whether it sits before or after Encode.
 
 ### Required Patches
 
@@ -259,7 +294,7 @@ Stitches each tile's generated result back onto the canvas using `grid`.
 | Port | Type | Required | Description |
 |---|---|---|---|
 | `tile_images` | IMAGE list | Yes | Per-tile generated results (after KSampler → VAE Decode). |
-| `grid` | GRID | Yes | From Split. |
+| `grid` | GRID | Yes | From Element Tile Info's `grid`. |
 | `feather` | FLOAT 0–1 | Yes | Feathering strength. Default 1.0. |
 | `tile_sources` | IMAGE list | No | Per-tile original images. Used as color-matching reference. |
 | `original_image` | IMAGE | No (**recommended**) | Underlay image. Without it, edge alpha < 1 may cause black fringing. |
@@ -298,7 +333,7 @@ Stitches each tile's generated result back onto the canvas using `grid`.
 - `feather = 0` switches hard at the repaintable region's midline (not at the tile edge).
 - With Split's `edge mask` on, only **neighbours of the same layer** narrow the transition to the region between their locked bands; a hand-drawn tile's side facing the background starts at its own exclusion boundary with the box edge as the 50% point, so even a large `lock` cannot eat the box border or its rounded corners, and the exclusion boundary leaves no hard step. Within one layer, wider bands leave a narrower middle (per-side transition width = `overlap/2 − this tile's band`; a large `lock` can leave only a hard seam between two tiles of that layer), so widen the transition by lowering `lock`. Background tiles are unaffected and always blend across the whole overlap.
 - **Rounded corners depend only on this node's `feather`**: Split's `corner feather` merely shapes the sampling lock (ramping inward), and Merge no longer trims the corner along an expanded outline or a square boundary.
-- You can use the [Smart merge images node](https://github.com/supElement/ComfyUI_Element_easy) from another extension as a replacement; it provides better results for color and distortion correction. When connected to Split's `grid`, it reuses this node's alpha / feather geometry (centred ramps, same-layer transitions between lock bands, corner ramps around the drawn arc); hand-drawn tiles exclude their locked band and background tiles do not.
+- You can use the [Smart merge images node](https://github.com/supElement/ComfyUI_Element_easy) from another extension as a replacement; it provides better results for color and distortion correction. When connected to Element Tile Info's `grid`, it reuses this node's alpha / feather geometry (centred ramps, same-layer transitions between lock bands, corner ramps around the drawn arc); hand-drawn tiles exclude their locked band and background tiles do not.
 ---
 
 ## ElementKrea2InContextPatch (Model Patch)
@@ -344,7 +379,7 @@ Attaches a per-step `reference_strength` schedule to the model.
 | Parameter | Type | Default | Description | Notes |
 |---|---|---|---|---|
 | `reference_strength` | STRING | `"1.0,1.0,1.0,0.8,0.5"` | A list of reference strengths, applied step-by-step. | Same semantics as in TiledUpscale. See detailed explanation below. |
-| `model_type` | COMBO | `auto` | Model family. `auto` = Automatically detected based on the currently loaded model. | Manually specifying this determines both the reference channel for this node and the conditioning branch for downstream `ElementTileEncode` nodes (passed via the `MODEL` connection). You only need to set this once here. |
+| `model_type` | COMBO | `auto` | Model family. `auto` = Automatically detected based on the currently loaded model. | Manually specifying this determines both the reference channel for this node and the conditioning branch for downstream `ElementTileEncode` nodes (passed via the `MODEL` connection). You only need to set this once here. The `minimax` entry covers both H3-Image and H3 video models. |
 | `channel_override` | COMBO | `auto` | Reference channel override (for debugging). | Use only when the reference input method has been modified by a custom node. This affects only the current node and does not alter the model family detection for downstream encoding operations. |
 
 ### `reference_strength` Details
@@ -368,4 +403,4 @@ Attaches a per-step `reference_strength` schedule to the model.
 - **Don't use it together with TiledUpscale**: the all-in-one already attaches the same-named patch internally; re-attaching gets stripped by `_strip_owned_patches` and re-added, which is redundant.
 - For decimal separators, **use the English period `0.8`**; Chinese periods will fail to parse.
 - Can accept the `strength_string` output from [Element_listGraph_Curve](https://github.com/supElement/ComfyUI_Element_easy).
-- Lower parameter values ​​increase the likelihood of "drift." To ensure consistency, use higher values ​​for the initial steps—ideally, set the value to 1 for the first few steps. For subsequent steps, the value can be adjusted downward depending on the specific model being used; this approach is more effective for correcting imperfections. This parameter is independent of the `denoise` setting and does not affect vision- or grounding-based references. It is not applicable to models not designed for image editing (e.g., SDXL, Qwen-Image-2512, etc.).
+- Lower parameter values ​​increase the likelihood of "drift." To ensure consistency, use higher values ​​for the initial steps—ideally, set the value to 1 for the first few steps. For subsequent steps, the value can be adjusted downward depending on the specific model being used; this approach is more effective for correcting imperfections. This parameter is independent of the `denoise` setting. Qwen-style vision/grounding references (living in the text conditioning) are unaffected, while MiniMax's `minimax_refs` references are controlled by this parameter (a step set to 0 strips the refs entirely). AV models such as MiniMax-H3-Video are supported too: each of the two streams is blended separately. It is not applicable to models not designed for image editing (e.g., SDXL, Qwen-Image-2512, etc.).
