@@ -67,8 +67,9 @@ function defaultState() {
     overlap_mode: "px", overlap_px: 64, overlap_pct: 15,
     enable_mask: false, edge_mask_pct: 90, edge_mask_feather: 50,
     fill_gaps: true, gap_max_px: 1536,
-    // global_prompt: "enhance quality preserving all the details", 
-	global_prompt: "Enhance image clarity and resolution. Sharpen fine details and textures across the entire image. Add natural micro-detail and micro-contrast. Make edges crisp but clean, surfaces and materials more defined, and reduce blur and noise. Natural colors, realistic light and shadow, professional finish.", 
+    //global_prompt: "enhance quality preserving all the details", 
+	//global_prompt: "Enhance image clarity and resolution. Sharpen fine details and textures across the entire image. Add natural micro-detail and micro-contrast. Make edges crisp but clean, surfaces and materials more defined, and reduce blur and noise. Natural colors, realistic light and shadow, professional finish.", 
+	global_prompt: "Enhance natural details and textures throughout the image, reduce blur and noise, and improve resolution for a professional-grade result. Maintain consistent hue, lighting, and brightness.", 
     global_append: true, 
     global_negative: "",
 	enable_layer_upscale: false,
@@ -133,10 +134,6 @@ function balancedSubsplit(rects, gapMax) {
   }
   return out;
 }
-
-
-
-
 
 
 // A 的实际形状（圆角矩形）是否与矩形 rect=[x,y,w,h] 有正面积交集（精确版）
