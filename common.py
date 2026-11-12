@@ -223,22 +223,103 @@ def _refs_are_present(refs):
     return True    
 
 
-def _find_ref_slot(args, kwargs):
-    payload = kwargs.get("minimax_payload")
-    if isinstance(payload, dict) and payload.get("refs"):
-        return ("minimax", "minimax_payload")
-    if kwargs.get("ref_kv") is not None:
-        return ("kwargs", "ref_kv")
-    for key in ("ref_latents", "reference_latents"):
-        if kwargs.get(key) is not None:
-            return ("kwargs", key)
-    if kwargs.get("ref_states") is not None:
-        return ("flux3", None)
-    for i, a in enumerate(args):
-        if torch.is_tensor(a) and a.ndim == 5:
-            return ("args", i)
-        if isinstance(a, (list, tuple)) and len(a) > 0 and torch.is_tensor(a[0]):
-            return ("args", i)
+_REF_CHANNELS = ("minimax_payload", "ref_kv", "ref_latents", "reference_latents",
+                 "ref_states", "positional")
+
+
+def _describe_ref_channels(channels):
+    """把通道规格渲染成日志文本：位置槽 -> 'args[1]'，kwargs 通道 -> 名字。"""
+    parts = []
+    for channel in channels:
+        if isinstance(channel, tuple) and len(channel) == 2 and channel[0] == "args":
+            parts.append(f"args[{channel[1]}]")
+        else:
+            parts.append(str(channel))
+    return " / ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# 模型家族规格：单一真相
+# ElementStrengthSchedule 用它生成下拉、取参考通道，并把家族 key 写进返回的
+# MODEL；ElementTileEncode 读同一个 key 决定 conditioning 分支。两侧不再各维护
+# 一份枚举（旧实现两份枚举文案不同，选成不同族时静默走错分支）。
+# channels 两种写法见 _find_ref_slot：名字 = kwargs 通道；("args", i) = 位置槽。
+# ---------------------------------------------------------------------------
+_ELEMENT_FAMILIES = {
+    "krea2":     {"label": "Krea 2 — ref_latents",                      "channels": (("args", 1),)},
+    "qwen21":    {"label": "Qwen Image 2.1 — ref_latents",              "channels": (("args", 0),)},
+    "qwen_edit": {"label": "Qwen Edit 2509/2511 — ref_latents",         "channels": (("args", 1),)},
+    "minimax":   {"label": "MiniMax-H3-Image — minimax_payload.refs",   "channels": ("minimax_payload",)},
+    "moss":      {"label": "MOSS-Image — ref_kv / ref_latents",         "channels": ("ref_kv", "ref_latents")},
+    "flux2":     {"label": "FLUX.2 Klein — ref_latents",                "channels": (("args", 2),)},
+    "flux3":     {"label": "FLUX.3 Klein — ref_states",                 "channels": ("ref_states", "ref_latents")},
+    "generic":   {"label": "generic — ref_latents / reference_latents", "channels": ("ref_latents", "reference_latents", "positional")},
+}
+
+# 传输覆盖：只影响 ElementStrengthSchedule 去哪个槽位找参考，不参与家族判断，
+# 因此不影响下游 Encode 的 conditioning 分支（两者是正交的两个轴）。
+_CHANNEL_OVERRIDES = {
+    "reference_latents": {"label": "channel：reference_latents (kwargs)", "channels": ("reference_latents",)},
+    "ref_latents":       {"label": "channel：ref_latents (kwargs)",       "channels": ("ref_latents",)},
+    "minimax_payload":   {"label": "channel：minimax_payload.refs",       "channels": ("minimax_payload",)},
+    "ref_kv":            {"label": "channel：ref_kv",                     "channels": ("ref_kv",)},
+    "ref_states":        {"label": "channel：ref_states",                 "channels": ("ref_states",)},
+    "positional":        {"label": "channel：positional",                 "channels": ("positional",)},
+}
+
+_AUTO_LABEL = "auto"
+_CHANNEL_AUTO_LABEL = "auto"
+_MODEL_FAMILY_KEY = "element_tile_model_family"
+
+
+def _model_family(model):
+    """读上游 ElementStrengthSchedule 写在 MODEL 上的家族 key；未接则 'auto'。
+    这不是"兜底探测"：没接 Schedule 时 Encode 只能靠自身检测，权当 auto。"""
+    options = getattr(model, "model_options", None)
+    family = options.get(_MODEL_FAMILY_KEY) if isinstance(options, dict) else None
+    return family if family in _ELEMENT_FAMILIES else "auto"
+
+
+def _find_ref_slot(args, kwargs, channels=_REF_CHANNELS):
+    """按 channels 顺序找参考槽位。模型族可只给本族实际使用的通道；auto 传全量。
+
+    通道项有两种：
+      - 字符串       : kwargs 通道名（extra_conds 打包进来的参考，如 MOSS/FLUX.3/MiniMax）
+      - ("args", i)  : core 用位置参数传参考时的确切槽位（Qwen 2.1 / Qwen Edit /
+                       Krea 2 / FLUX.2 的 forward().execute(...) 都是位置传参，
+                       wrapper 的 kwargs 里没有 ref_latents）
+    """
+    for channel in channels:
+        if isinstance(channel, tuple):
+            if len(channel) != 2 or channel[0] != "args":
+                continue
+            index = channel[1]
+            if not isinstance(index, int) or not (0 <= index < len(args)):
+                continue
+            value = args[index]
+            if value is None:
+                # 合法槽位但本步无参考（如 cfg 的 uncond 分支），交给 _refs_are_present 判
+                return ("args", index)
+            if isinstance(value, (list, tuple)) and len(value) > 0 and torch.is_tensor(value[0]):
+                return ("args", index)
+            if torch.is_tensor(value) and value.ndim >= 4:
+                return ("args", index)
+            continue
+        if channel == "minimax_payload":
+            payload = kwargs.get("minimax_payload")
+            if isinstance(payload, dict) and payload.get("refs"):
+                return ("minimax", "minimax_payload")
+        elif channel == "ref_states":
+            if kwargs.get("ref_states") is not None:
+                return ("flux3", None)
+        elif channel == "positional":
+            for i, a in enumerate(args):
+                if torch.is_tensor(a) and a.ndim == 5:
+                    return ("args", i)
+                if isinstance(a, (list, tuple)) and len(a) > 0 and torch.is_tensor(a[0]):
+                    return ("args", i)
+        elif kwargs.get(channel) is not None:
+            return ("kwargs", channel)
     return (None, None)
 
 
@@ -334,7 +415,7 @@ def _drop_refs_no_cache(executor, args, kwargs):
         args = args[:slot] + (opts,) + args[slot + 1:]
     return args, kwargs
 
-def _scheduled_ref_model(model, strength_schedule):
+def _scheduled_ref_model(model, strength_schedule, ref_channels=None):
     """reference-latent 路径（Qwen Image 2.1 / Edit 2509/2511 / FLUX.2 等）的每步
     参考强度调度：DIFFUSION_MODEL wrapper 在每次前向按当前步强度做预测差值引导：
         pred = pred_无参考 + s * (pred_有参考 - pred_无参考)
@@ -353,11 +434,12 @@ def _scheduled_ref_model(model, strength_schedule):
     schedule = _StepSchedule(values)
     patched = model.clone()
     # state = {"flux3_logged": False}
-    state = {"flux3_logged": False, "moss_checked": False, "is_moss": False, "minimax_logged": False}
+    state = {"flux3_logged": False, "moss_checked": False, "is_moss": False,
+             "minimax_logged": False, "slot_miss_logged": False}
     safe_strip = _noref_cache_bypass_needed()   # 核心有 bug 才隔离缓存
 
     def wrapper(executor, x, timesteps, context, *args, **kwargs):
-        kind, slot = _find_ref_slot(args, kwargs)
+        kind, slot = _find_ref_slot(args, kwargs, ref_channels or _REF_CHANNELS)
         # QwenImageTransformer2DModel 把 ref_latents 按位置参数传入
         # (.execute(x, t, ctx, attn_mask, ref_latents, ...)，位于 args[1])，
         # _find_ref_slot 的 list/5D 张量分支均可命中；5D x 同样合法。
@@ -371,6 +453,11 @@ def _scheduled_ref_model(model, strength_schedule):
         #-------------------------------
         
         if kind is None or getattr(x, "ndim", None) not in (4, 5):
+            if kind is None and ref_channels and not state["slot_miss_logged"]:
+                state["slot_miss_logged"] = True
+                logging.warning("[TileSchedule] 指定的参考通道 %s 未出现在本次前向中；"
+                                "若只在 cfg 的 uncond 分支出现可忽略，否则逐步强度不会生效。",
+                                _describe_ref_channels(ref_channels))
             return executor(x, timesteps, context, *args, **kwargs)
         if kind == "flux3":
             refs = kwargs["ref_states"]   
@@ -402,13 +489,13 @@ def _scheduled_ref_model(model, strength_schedule):
         # --- 新增加结束 ---
         
         if binary or s <= 0.001:
-            args2, kwargs2 = _set_refs(args, kwargs, kind, slot, None)
+            args2, kwargs2 = _set_refs(args, kwargs, kind, slot, strip_value)
             if safe_strip:                                       
                 args2, kwargs2 = _drop_refs_no_cache(executor, args2, kwargs2)
             return executor(x, timesteps, context, *args2, **kwargs2)
 
         # guidance：双前向 + 预测差值外推
-        args2, kwargs2 = _set_refs(args, kwargs, kind, slot, None)
+        args2, kwargs2 = _set_refs(args, kwargs, kind, slot, strip_value)
         out_with = executor(x, timesteps, context, *args, **kwargs)
         if safe_strip:                                            
             args2, kwargs2 = _drop_refs_no_cache(executor, args2, kwargs2)

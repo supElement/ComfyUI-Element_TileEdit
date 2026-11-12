@@ -17,12 +17,26 @@ import logging
 
 import torch
 
-from .common import _krea2_in_context_forward, _is_krea2, _parse_strength_schedule, _scheduled_ref_model, _strip_owned_patches
+from .common import (
+    _krea2_in_context_forward, _is_krea2, _parse_strength_schedule, _scheduled_ref_model,
+    _strip_owned_patches, _describe_ref_channels, _ELEMENT_FAMILIES, _CHANNEL_OVERRIDES,
+    _AUTO_LABEL, _CHANNEL_AUTO_LABEL, _MODEL_FAMILY_KEY,
+)
+
+# 模型家族与参考通道的唯一真相在 common._ELEMENT_FAMILIES / _CHANNEL_OVERRIDES：
+# 本节点据此生成下拉、取参考通道，并把家族 key 写进返回的 MODEL；下游
+# ElementTileEncode 读同一个 key 决定 conditioning 分支，不再有第二个下拉。
+_FAMILY_OPTIONS = [_AUTO_LABEL] + [spec["label"] for spec in _ELEMENT_FAMILIES.values()]
+_FAMILY_BY_LABEL = {spec["label"]: key for key, spec in _ELEMENT_FAMILIES.items()}
+_CHANNEL_OPTIONS = [_CHANNEL_AUTO_LABEL] + [spec["label"] for spec in _CHANNEL_OVERRIDES.values()]
+_CHANNEL_BY_LABEL = {spec["label"]: key for key, spec in _CHANNEL_OVERRIDES.items()}
 
 class ElementStrengthSchedule:
     """MODEL -> MODEL：把逐步 reference_strength 调度挂到模型上。
     供 ElementTileSplit + 原生 KSampler 工作流使用（Split 不输出 MODEL，
-    调度必须经模型 patch 进入采样）。KSampler 的 model 输入必须接本节点输出。"""
+    调度必须经模型 patch 进入采样）。KSampler 的 model 输入必须接本节点输出。
+    model_type 是模型家族的唯一开关：既决定本节点的参考通道，也写进返回的
+    MODEL，供下游 ElementTileEncode 决定 conditioning 分支（消除第二个下拉）。"""
     CATEGORY = "Element TileEdit"
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "patch"
@@ -32,17 +46,35 @@ class ElementStrengthSchedule:
         return {"required": {
             "model": ("MODEL",),
             "reference_strength": ("STRING", {"default": "1.0,1.0,1.0,0.8,0.5", "multiline": False, "tooltip":
-                "The list of reference strengths per step corresponds solely to the 'steps' parameter; 'denoise' or 'sigma' values ​​have no effect."
-                "Supports delimiters including commas (Chinese/English), enumeration commas (、), and colons. A single value applies to every step."
-                "If fewer values ​​are provided than the number of steps, the final value is repeated; if more are provided," 
-                "the list is truncated. A value of 1.0 represents the original behavior."}),
+                "Per-step strengths (,，、:：; separated); short list repeats last, long list truncated; 1.0 = original; denoise ignored.\n"
+                "逐 step 强度（,，、:：; 分隔）；不足重复末值，超出截断；1.0 = 原行为；与 denoise 无关。"}),
+        }, "optional": {
+            "model_type": (_FAMILY_OPTIONS, {"default": _AUTO_LABEL, "tooltip":
+                "auto = detect from the loaded model; a manual pick also drives the downstream ElementTileEncode branch.\n"
+                "auto = 自动检测；手动指定同时决定本节点通道与下游 ElementTileEncode 分支。"}),
+            "channel_override": (_CHANNEL_OPTIONS, {"default": _CHANNEL_AUTO_LABEL, "tooltip":
+                "Debug: force one raw channel over the family default; this node only, Encode unaffected.\n"
+                "调试用：强制参考通道，覆盖家族默认；只影响本节点，不影响下游 Encode。"}),
         }}
 
-    def patch(self, model, reference_strength):
+    def patch(self, model, reference_strength, model_type=_AUTO_LABEL,
+              channel_override=_CHANNEL_AUTO_LABEL):
         values = _parse_strength_schedule(reference_strength)
+        family = _FAMILY_BY_LABEL.get(model_type, "auto")
+        ref_channels = _ELEMENT_FAMILIES[family]["channels"] if family in _ELEMENT_FAMILIES else None
+        channel = _CHANNEL_BY_LABEL.get(channel_override)
+        if channel:
+            ref_channels = _CHANNEL_OVERRIDES[channel]["channels"]
+            logging.info("[TileSchedule] reference channel overridden: %s",
+                         _describe_ref_channels(ref_channels))
+        elif ref_channels:
+            logging.info("[TileSchedule] reference channel for family %s: %s",
+                         family, _describe_ref_channels(ref_channels))
         model = _strip_owned_patches(model, keys=("tiled_upscale_strength_schedule",),
                                      strip_extra_conds=False)
-        return (_scheduled_ref_model(model, values),)
+        # 家族 key 随 MODEL 传给下游：Encode 读它决定 conditioning 分支。
+        model.model_options[_MODEL_FAMILY_KEY] = family
+        return (_scheduled_ref_model(model, values, ref_channels),)
 
 
 class ElementKrea2InContextPatch:

@@ -23,6 +23,7 @@ from .common import (
     _is_minimax_image,
     _is_krea2,
     _has_krea2_in_context_patch,
+    _model_family,
     _strip_owned_patches,
     _grounded_reference_conditioning,
     _grounded_conditioning,
@@ -91,6 +92,7 @@ class ElementTileEncode:
         clip = _unwrap(clip)
         reference_mode = bool(_unwrap(reference_mode, False))
         grounding_px = int(_unwrap(grounding_px, 768) or 0)
+        family = _model_family(model)
 
         prompts = _as_string_list(tile_prompts)
         negatives = _as_string_list(tile_negatives)
@@ -120,8 +122,19 @@ class ElementTileEncode:
 
         alignment = _pixel_alignment(model)
 
-        krea2 = _is_krea2(model.get_model_object("diffusion_model"))
-        minimax = _is_minimax_image(model)
+        auto = family == "auto"
+        diffusion_model = model.get_model_object("diffusion_model")
+        if auto:
+            krea2 = _is_krea2(diffusion_model)
+            minimax = _is_minimax_image(model)
+            moss = _is_moss_image(model)
+            flux_latent = _is_flux2_family(model)
+        else:
+            krea2 = family == "krea2"
+            minimax = family == "minimax"
+            moss = family == "moss"
+            flux_latent = family in ("flux2", "flux3")
+            logging.info("[TileEncode] model family from ElementStrengthSchedule: %s", family)
         has_in_context_patch = krea2 and _has_krea2_in_context_patch(model)
         in_context = krea2 and (reference_mode or has_in_context_patch)
         if reference_mode and not krea2:
@@ -134,8 +147,14 @@ class ElementTileEncode:
             grounded, reference_method = False, None
         else:
             mode = "conditioning"
-            grounded, reference_method = False, _reference_method(model, [])
-            if _is_moss_image(model):
+            grounded = False
+            if family == "moss":
+                reference_method = "index_timestep_zero_text_start"
+            elif family == "flux2":
+                reference_method = "index"
+            else:
+                reference_method = _reference_method(model, [])
+            if moss:
                 mode = "conditioning (MOSS-Image)"
                 logging.info("[TileEncode] MOSS-Image detected; references ride as native "
                              "reference latents (index_timestep_zero_text_start). "
@@ -145,15 +164,21 @@ class ElementTileEncode:
                 mode = "conditioning (MiniMax-H3-Image)"
                 logging.info("[TileEncode] MiniMax-H3-Image detected; each tile rides as "
                              "Picture 1 (minimax_refs + vision) and is re-injected every step.")
-            elif any(p.strip() for p in prompts) and _tokenizer_handles_images(clip) \
-                    and not _is_flux2_family(model):
+            elif family in ("krea2", "qwen21", "qwen_edit") or (
+                    auto and any(p.strip() for p in prompts)
+                    and _tokenizer_handles_images(clip) and not flux_latent):
                 grounded = True
                 mode = "conditioning (grounded)"
 
         qwen21 = False
         if grounded:
-            tok_name = type(getattr(clip, "tokenizer", None)).__name__.lower().replace("_", "")
-            qwen21 = ("qwenimage21" in tok_name) and alignment == 32
+            if family == "qwen21":
+                qwen21 = True
+            elif family == "qwen_edit":
+                qwen21 = False
+            else:
+                tok_name = type(getattr(clip, "tokenizer", None)).__name__.lower().replace("_", "")
+                qwen21 = ("qwenimage21" in tok_name) and alignment == 32
 
         pbar = comfy.utils.ProgressBar(n)
         logging.info("[TileEncode] %s | %d tile(s) | alignment=%d", mode, n, alignment)
