@@ -241,9 +241,9 @@ class ElementTileEncode:
                     clip, p, vae, crop, grounding_px,
                     reference_method=reference_method, encode_negative=True,
                     qwen21=qwen21, negative_prompt=ng, krea2=krea2, minimax=minimax,
-                    minimax_video=minimax_video)
+                    minimax_video=minimax_video, tile_latent=latent)
             elif in_context:
-                ref_latent = vae.encode(crop)
+                ref_latent = latent
                 extra = {"reference_latents": [ref_latent],
                          "reference_latents_method": "index_timestep_zero"}
                 if _tokenizer_handles_images(clip):

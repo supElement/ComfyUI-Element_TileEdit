@@ -799,7 +799,9 @@ def _minimax_rgb(pixels, width, height):
 def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_px,
                                      reference_method=None, encode_negative=False, qwen21=False,
                                      global_pixels=None, global_ref_latent=None, negative_prompt="",
-                                     krea2=False, minimax=False, minimax_video=False):
+                                     krea2=False, minimax=False, minimax_video=False,
+                                     tile_latent=None):
+    # tile_latent 由调用方用同一 tile_pixels 预编码时传入，省掉一次重复的 VAE 编码。
     samples = tile_pixels[:1].movedim(-1, 1)
     dual = global_pixels is not None and global_ref_latent is not None
     if minimax:
@@ -843,7 +845,7 @@ def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_p
     elif krea2:
         # Krea 2 的训练配方是 Qwen3-VL + _GROUNDING_TEMPLATE（Describe the image...）
         # 且 vision 按最长边截断；不能套 2509 的 "Picture 1:" + 384² 面积桶。
-        ref_latents = [vae.encode(tile_pixels[:1])]
+        ref_latents = [tile_latent if tile_latent is not None else vae.encode(tile_pixels[:1])]
         positive = _grounded_conditioning(clip, prompt, tile_pixels, grounding_px)
         images = None
     elif qwen21:
@@ -851,7 +853,7 @@ def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_p
         t_rgb = s[:, :, :, :3]
         if s.shape[-1] > 3:
             t_rgb = t_rgb * s[:, :, :, 3:] + (1.0 - s[:, :, :, 3:])
-        t_latent = vae.encode(s)
+        t_latent = tile_latent if tile_latent is not None else vae.encode(s)
         if dual:
             g_rgb = global_pixels[:, :, :, :3]
             if global_pixels.shape[-1] > 3:
@@ -868,7 +870,7 @@ def _grounded_reference_conditioning(clip, prompt, vae, tile_pixels, grounding_p
             clip.tokenize(full_prompt, images=images, prevent_empty_text=True))
     else:
         # 2509/2511：静态放松已移除，参考 = 原始 tile latent，削弱由前向内的调度完成
-        ref_latents = [vae.encode(tile_pixels[:1])]
+        ref_latents = [tile_latent if tile_latent is not None else vae.encode(tile_pixels[:1])]
         total = int(384 * 384) if grounding_px <= 0 or grounding_px >= 384 else int(grounding_px * grounding_px)
         scale_by = math.sqrt(total / (samples.shape[3] * samples.shape[2]))
         width = max(1, round(samples.shape[3] * scale_by))
